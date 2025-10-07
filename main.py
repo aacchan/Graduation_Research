@@ -46,6 +46,18 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
             model_id=model_id,
             **model_settings
         )
+    elif llm_type == 'llama2':
+        kwargs = {
+            'api_key': "EMPTY",
+            'base_url': "http://localhost",
+            'port': 8000,
+            'version': 'v1',
+            'model': 'meta-llama/Llama-2-13b-chat-hf'
+        }
+        llm = AsyncChatLLM(kwargs=kwargs)
+        controller = AsyncGPTController(
+            llm=llm, model_id=model_id, **model_settings
+        )    
 
     elif llm_type == 'mixtral':
         kwargs = {
@@ -107,6 +119,14 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
             "top_p": 1.0,
             "n": 10,
         }
+    elif llm_type == 'llama2':
+        model_settings = {
+            "model": "meta-llama/Llama-2-13b-chat-hf",
+            "max_tokens": 2000,
+            "temperature": 0.2,
+            "top_p": 1.0,
+            "n": 10,
+        }    
     elif llm_type == 'mixtral':
         model_settings = {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
