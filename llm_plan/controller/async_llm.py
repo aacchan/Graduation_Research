@@ -16,7 +16,7 @@ class AsyncChatLLM:
         Initializes AsynceOpenAI client.
         """
         self.model = kwargs.pop("model")
-        if self.model == "gpt-4-1106-preview" or self.model == "gpt-4o" or self.model == "gpt-3.5-turbo-1106":
+        if self.model == "gpt-4o" or self.model == "gpt-4o" or self.model == "gpt-3.5-turbo-1106":
             pass
         else:
             #OmegaConf.set_struct(kwargs, False) 

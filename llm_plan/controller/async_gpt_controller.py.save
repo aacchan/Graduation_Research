@@ -1,3 +1,4 @@
+
 from typing import Any, Dict, List
 
 import asyncio
@@ -102,7 +103,6 @@ class AsyncGPTController():
         Get the response from the model.
         """
         self.model_args['temperature'] = temperature
-        self.model_args['top_p'] = 0.9
         self.model_args['model'] = self.llm.model
         return await self.llm(messages=messages, **self.model_args)
     

@@ -14,7 +14,7 @@ ACTION_IDX = {
     "FORWARD": 1,
     "BACKWARD": 2,
     "STEP_LEFT": 3,
-    "STEP_RIGHT": 4,    
+    "STEP_RIGHT": 4,
     "TURN_LEFT": 5,
     "TURN_RIGHT": 6,
     "FIRE_ZAP": 7,
@@ -51,19 +51,19 @@ async def run_episode(env, agent):
     else:
         agent_label = agent.agent_type + '_'+ agent.llm_type
     frame_folder = f'./frames/{env.substrate_name}/agent_{agent_label}/scenario_{env.eval_num}_{date_time_str}'
-    # initial step  
-    start_time = time.time()  
+    # initial step
+    start_time = time.time()
     step = 0
     state, obs, _ = env.reset()
     save_obs_frames(obs, step, frame_folder)
     agent.update_state(state)
-    agent_goals_and_actions = {}    
+    agent_goals_and_actions = {}
     # Generate subgoals to execute given high-level strategy
     # keep track of the execution outcomes
     execution_outcomes = {}
     # keep track of agents that have errors while parsing response to get actions
     get_action_from_response_errors = {}
-    reward_tracker = {agent.agent_id: 0} 
+    reward_tracker = {agent.agent_id: 0}
     output_data_path = os.path.join(frame_folder, 'output_data.txt')
     response_data_path = os.path.join(frame_folder, 'response_data.json')
     global all_output_file
@@ -111,7 +111,14 @@ async def run_episode(env, agent):
     after_interaction = False
     inventory_per_step = []
 
+    #step時間測定
+    step_metrics = []         # 各ステップの計測結果を格納するリスト
+    last_total_cost = total_cost  # ステップごとのコスト増分を出すための基準
+
     while not done:
+        #ステップの計測開始
+        step_start = time.perf_counter()
+
         step += 1
         """Agent actions"""
         step_actions_dict = {}
@@ -130,7 +137,7 @@ async def run_episode(env, agent):
             plan_grid = make_plan_grid(goal_and_plan, env, agent)
             agent.get_actions_from_plan(goal_and_plan, plan_grid, state)
             action = agent.act()
-        
+
         if action and action[:8] == 'INTERACT' or action == 'FIRE_ZAP':
             if action == 'FIRE_ZAP':
                 interact_action = action
@@ -233,8 +240,8 @@ async def run_episode(env, agent):
                     print_and_save(f"Inventory reset to base inventory. Previous inventory: {current_inventory}")
                     #breakpoint()
                 interaction_inventory = {
-                    'rock/yellow': int(current_inventory[0]), 
-                    'paper/purple': int(current_inventory[1]), 
+                    'rock/yellow': int(current_inventory[0]),
+                    'paper/purple': int(current_inventory[1]),
                     'scissors/blue': int(current_inventory[2])
                 }
                 break
@@ -314,6 +321,25 @@ async def run_episode(env, agent):
         if not during_interaction:
             execution_outcomes = {}
             execution_outcomes[agent.agent_id] =  agent.update_state(state)
+
+        #ステップ計測の終了・記録
+        step_duration = time.perf_counter() - step_start
+        # 直近ステップのコスト増分（合計→差分）
+        step_total_cost = agent.controller.total_inference_cost
+        step_cost_delta = step_total_cost - last_total_cost
+        last_total_cost = step_total_cost
+
+        # ログに出す（画面＋all_output_data.txt に保存）
+        print_and_save(f"Step {step} exec_time: {step_duration:.4f}s, cost+={step_cost_delta:.6f}")
+
+        # CSV にも出せるように配列に貯めておく
+        step_metrics.append({
+            "step": step,
+            "exec_time_sec": step_duration,
+            "cost_delta": float(step_cost_delta),
+            "total_cost": float(step_total_cost)
+        })
+
     print_and_save(f"Episode finished at step {step} with rewards {reward_tracker}")
 
     # save results in minutes
@@ -337,5 +363,3 @@ async def run_episode(env, agent):
     df_all_results.to_csv(all_results_file)
 
     return frame_folder
-
-        

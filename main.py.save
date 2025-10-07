@@ -39,6 +39,8 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
             'port': 8000,
             'version': 'v1',
             'model': 'meta-llama/Llama-3.1-8B-Instruct'
+            "temperature": 0.3, # 変更
+            "top_p": 1.0        # 変更
         }
         llm = AsyncChatLLM(kwargs=kwargs)
         controller = AsyncGPTController(
@@ -46,7 +48,6 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
             model_id=model_id,
             **model_settings
         )
-
     elif llm_type == 'mixtral':
         kwargs = {
             'api_key': "EMPTY",
@@ -64,15 +65,15 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
 
 
     agent_config_obj = {'agent_id': model_id}
-
+    
     agent_class_path = agent_config[substrate][agent_type][llm_type]
     agent_module_path, agent_class_name = agent_class_path.rsplit('.', 1)
     agent_module = importlib.import_module(agent_module_path)
     agent_class = getattr(agent_module, agent_class_name)
-
+    
     if 'hypothetical_minds' in agent_type or 'hm' in agent_type:
         agent_config_obj['self_improve'] = True
-
+    
     agent = agent_class(agent_config_obj, controller)
     return agent
 
