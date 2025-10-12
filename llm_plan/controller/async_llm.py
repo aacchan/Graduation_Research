@@ -1,9 +1,7 @@
 import os
-from typing import 
 from typing import Optional, Dict, Any, List
-from openai import AsyncClient
 from omegaconf import OmegaConf
-from openai import OpenAI
+from openai import AsyncOpenAI as OpenAI
 
 def _build_extra_body(structured_schema: Optional[Dict[str, Any]] = None,
                       backend: str = "lm-format-enforcer") -> Dict[str, Any]:
@@ -35,14 +33,14 @@ class AsyncChatLLM:
             kwargs["base_url"] = f"{base_url}:{port}/{version}"            
             #OmegaConf.set_struct(kwargs, True)
         
-        self.client = AsyncClient(**kwargs)
+        self.client = OpenAI(**kwargs)
 
     @property
     async def __call__(self,
         messages: List[Dict[str, str]],
         *,
-        structured_schema: Optional[Dict[str, Any]] = None,   # ← 追加：構造スキーマ（dict/tuple/なし）
-        guided_backend: str = "lm-format-enforcer",            # ← 追加：バックエンド（LMFE 等）
+        structured_schema: Optional[Dict[str, Any]] = None,
+        guided_backend: str = "lm-format-enforcer",
         **kwargs,
     ):
         
@@ -59,6 +57,10 @@ class AsyncChatLLM:
                     
         
         # guided decoding 用の追加パラメータを extra_body で付与（vLLM の拡張）
+        extra_body = _build_extra_body(structured_schema, guided_backend)
+        if extra_body:
+            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **extra_body}
+        
         extra_body = _build_extra_body(structured_schema, guided_backend)
         if extra_body:
             kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **extra_body}
