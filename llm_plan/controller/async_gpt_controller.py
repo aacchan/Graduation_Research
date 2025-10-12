@@ -1,7 +1,8 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import asyncio
 import re
+from llm_plan.structured_schemas import get_schema  # ← フェーズ1で作成済み
 
 def _base_model(name: str) -> str:
     # 末尾が -YYYY-MM-DD のモデル名は家族名に丸める（例: gpt-4o-2024-08-06 → gpt-4o）
@@ -94,23 +95,27 @@ class AsyncGPTController():
         return messages
     
     async def get_response(
-        self, 
+        self,
         messages: List[Dict[str, str]],
         temperature: float,
+        force: str = "none"   # ← 追加
     ) -> Any:
-        """
-        Get the response from the model.
-        """
         self.model_args['temperature'] = temperature
         self.model_args['top_p'] = 0.9
         self.model_args['model'] = self.llm.model
-        return await self.llm(messages=messages, **self.model_args)
+
+        schema = get_schema(force)  # "dict"/"tuple"/"none" → dict or None
+        # ラッパーに schema を渡す（A で追加した引数）
+        return await self.llm(messages=messages,
+                              structured_schema=schema,
+                              **self.model_args)
     
     async def run(
         self, 
         expertise: str,
         message: str,
         temperature: float,
+        force: str = "none"
     ) -> Dict[str, Any]:
         """Runs the Code Agent
 
@@ -121,29 +126,19 @@ class AsyncGPTController():
         Returns:
             A dictionary containing the code model's response and the cost of the performed API call
         """
-        # Get the prompt
-        messages = self.get_prompt(system_message=expertise, user_message=message)  
-        # Get the response
-        response = await self.get_response(messages=messages, temperature=temperature)
-        # Get Cost
+        messages = self.get_prompt(system_message=expertise, user_message=message)
+        response = await self.get_response(messages=messages, temperature=temperature, force=force)
         cost = self.calc_cost(response=response)
         print(f"Cost for running {self.model_args['model']}: {cost}")
-        # Store response including cost 
+
         if len(response.choices) == 1:
             response_str = response.choices[0].message.content
         else:
-            # send list of responses when n > 1
-            response_str = [choice.message.content for choice in response.choices]
-        full_response = {
-            'response': response,
-            'response_str': response_str,
-            'cost': cost
-        }
-        # Update total cost and store response
+            response_str = [c.message.content for c in response.choices]
+
+        full_response = {'response': response, 'response_str': response_str, 'cost': cost}
         self.total_inference_cost += cost
         self.all_responses.append(full_response)
-    
-        # Return response_string
         return full_response['response_str']
     
     async def batch_prompt_sync(
