@@ -1,8 +1,17 @@
 import os
-from typing import List, Dict
+from typing import 
+from typing import Optional, Dict, Any, List
 from openai import AsyncClient
 from omegaconf import OmegaConf
+from openai import OpenAI
 
+def _build_extra_body(structured_schema: Optional[Dict[str, Any]] = None,
+                      backend: str = "lm-format-enforcer") -> Dict[str, Any]:
+    extra: Dict[str, Any] = {}
+    if structured_schema is not None:
+        extra["guided_json"] = structured_schema
+        extra["guided_decoding_backend"] = backend
+    return extra
 
 class AsyncChatLLM:
     """
@@ -29,13 +38,14 @@ class AsyncChatLLM:
         self.client = AsyncClient(**kwargs)
 
     @property
-    def llm_type(self):
-        return "AsyncClient"
-
-    async def __call__(self, 
-        messages: List[Dict[str, str]], 
+    async def __call__(self,
+        messages: List[Dict[str, str]],
+        *,
+        structured_schema: Optional[Dict[str, Any]] = None,   # ← 追加：構造スキーマ（dict/tuple/なし）
+        guided_backend: str = "lm-format-enforcer",            # ← 追加：バックエンド（LMFE 等）
         **kwargs,
     ):
+        
         """
         Make an async API call.
         """        
@@ -47,4 +57,13 @@ class AsyncChatLLM:
             messages.append(user_message)
             messages.append(assistant_message)
                     
-        return await self.client.chat.completions.create(messages=messages, **kwargs)
+        
+        # guided decoding 用の追加パラメータを extra_body で付与（vLLM の拡張）
+        extra_body = _build_extra_body(structured_schema, guided_backend)
+        if extra_body:
+            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **extra_body}
+
+        return await self.client.chat.completions.create(
+            messages=messages,
+            **kwargs,
+        )
