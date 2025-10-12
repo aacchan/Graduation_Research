@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os
+import inspect
 from typing import Optional, Dict, Any, List
 
-from openai import AsyncOpenAI  # ← 公式SDKの非同期クライアントに統一
+from openai import AsyncOpenAI  # 公式SDKの非同期クライアント
+OpenAI = AsyncOpenAI
 from omegaconf import OmegaConf
 
 def _build_extra_body(structured_schema: Optional[Dict[str, Any]] = None,
@@ -70,8 +72,10 @@ class AsyncChatLLM:
             merged.update(caller_extra)  # ← 衝突時は呼び出し元の値を採用
             call_kwargs["extra_body"] = merged
 
-        # OpenAI 互換API（vLLM）へ実行
-        return await self.client.chat.completions.create(
+        result = self.client.chat.completions.create(
             messages=messages,
             **call_kwargs,
         )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
