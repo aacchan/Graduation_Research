@@ -47,7 +47,9 @@ class LiveLLM:
         self.model = model
         self.client = OpenAI(base_url=base_url, api_key=api_key)
     async def __call__(self, *, messages, **kwargs):
-        return self.client.chat.completions.create(model=self.model, messages=messages, **kwargs)
+        # Controller 側で kwargs に model が入っているので、重複させない
+        kwargs.setdefault("model", self.model)
+        return self.client.chat.completions.create(messages=messages, **kwargs)
 
 async def run_live(base_url: str, model: str):
     print("=== LIVE ===")
