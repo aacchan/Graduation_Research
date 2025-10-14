@@ -39,36 +39,6 @@ WAIT = re.compile(
 def _ok(cmd: str) -> bool:
     return bool(MOVE_TO.match(cmd) or INTERACT.match(cmd) or WAIT.match(cmd))
 
-# -------- モック LLM --------
-class DummyLLM:
-    def __init__(self, payload: str):
-        self.model = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.payload = payload
-        self.last_kwargs = None
-    async def __call__(self, *, messages, **kwargs):
-        self.last_kwargs = kwargs
-        class U: prompt_tokens=10; completion_tokens=5
-        class Msg: content = self.payload
-        class Ch: message = Msg()
-        return type("Resp", (), {"choices":[Ch()], "usage":U(), "model": self.model})
-
-async def run_mock():
-    print("=== MOCK ===")
-    payload = json.dumps({"action_plan": [
-        "move_to((3, 2), (5, 2))",
-        "interact((6, 2))",
-        "move_to((5, 2), (8, 3))"
-    ]})
-    ctl = AsyncGPTController(DummyLLM(payload), "mock")
-    raw = await ctl.run("You are an agent.",
-                        "上記の形式で行動計画を返して。JSONだけ。",
-                        0.0, force="dict")
-    data = json.loads(raw)
-    assert "action_plan" in data and isinstance(data["action_plan"], list)
-    assert all(_ok(cmd) for cmd in data["action_plan"]), f"pattern mismatch: {data}"
-    eb = ctl.llm.last_kwargs.get("extra_body", {})
-    assert "guided_json" in eb
-    print("[PASS] mock dict guided & pattern OK")
 
 # -------- 実機 vLLM --------
 class LiveLLM:
