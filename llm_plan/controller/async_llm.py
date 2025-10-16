@@ -45,11 +45,14 @@ class AsyncChatLLM:
         # 呼び出し毎の上書き
         call_kwargs = {**self.default_kwargs, **kwargs}
 
+        # model の二重指定を回避：優先は call_kwargs 側
+        model_param = call_kwargs.pop("model", self.model)
+
         # extra_body が無ければ明示的に渡さない（None を渡すとSDKが嫌がる場合があるため）
         extra_body = call_kwargs.pop("extra_body", None)
 
         return await self.client.chat.completions.create(
-            model=self.model,
+            model=model_param,
             messages=messages,
             **call_kwargs,
             **({"extra_body": extra_body} if extra_body else {}),
