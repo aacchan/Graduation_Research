@@ -5,11 +5,6 @@ from typing import Any, Dict, Optional
 from openai import AsyncOpenAI  # ← 非同期クライアント
 # 他に必要な import があれば追加
 
-class AsyncChatLLM:
-    """
-    vLLM / OpenAI 互換サーバ用の非同期 LLM ラッパ。
-    kwargs には model, api_key, base_url の他に host/port が来ることがあるので吸収する。
-    """
 
 class AsyncChatLLM:
     def __init__(self, kwargs: Dict[str, Any]) -> None:
@@ -38,17 +33,17 @@ class AsyncChatLLM:
 
 
     async def __call__(self, *, messages, **kwargs):
-        """
-        Chat Completions を叩く薄いラッパ。
-        controller 側から渡された extra_body（guided_json など）もそのまま通す。
-        """
-        # 呼び出し毎の上書き
         call_kwargs = {**self.default_kwargs, **kwargs}
 
-        # model の二重指定を回避：優先は call_kwargs 側
+        # model の二重指定を回避
         model_param = call_kwargs.pop("model", self.model)
 
-        # extra_body が無ければ明示的に渡さない（None を渡すとSDKが嫌がる場合があるため）
+        # ★ 未対応キーを除去（決定版）
+        UNSUPPORTED_CALL_KEYS = {"version"}  # 必要に応じて {"provider", ...} など追加可
+        for k in list(call_kwargs.keys()):
+            if k in UNSUPPORTED_CALL_KEYS:
+                call_kwargs.pop(k, None)
+
         extra_body = call_kwargs.pop("extra_body", None)
 
         return await self.client.chat.completions.create(
