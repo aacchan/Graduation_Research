@@ -1,81 +1,56 @@
-# llm_plan/controller/async_llm.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os
-import inspect
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, Optional
 
-from openai import AsyncOpenAI  # 公式SDKの非同期クライアント
-OpenAI = AsyncOpenAI
-from omegaconf import OmegaConf
-
-def _build_extra_body(structured_schema: Optional[Dict[str, Any]] = None,
-                      backend: str = "lm-format-enforcer") -> Dict[str, Any]:
-    """
-    vLLM の Structured Outputs 用 追加パラメータを組み立てる。
-    guided_json / guided_decoding_backend は vLLM 拡張なので extra に入れる。
-    """
-    extra: Dict[str, Any] = {}
-    if structured_schema is not None:
-        extra["guided_json"] = structured_schema
-        extra["guided_decoding_backend"] = backend
-    return extra
+from openai import AsyncOpenAI  # ← 非同期クライアント
+# 他に必要な import があれば追加
 
 class AsyncChatLLM:
     """
-    OpenAI 互換 API（vLLM サーバ想定）を叩く非同期ラッパー。
-
-    - structured_schema=None の場合は従来通り（制約なし）
-    - structured_schema が dict の場合は guided_json を付与（構造化出力）
+    vLLM / OpenAI 互換サーバ用の非同期 LLM ラッパ。
+    kwargs には model, api_key, base_url の他に host/port が来ることがあるので吸収する。
     """
-    def __init__(self, kwargs: Dict[str, Any]):
-        # `kwargs` には base_url, api_key, model などが入る前提
-        self.client = AsyncOpenAI(**{k: v for k, v in kwargs.items() if k != "model"})
-        self.model: Optional[str] = kwargs.get("model")  # 参照されるので保持
-        self.default_kwargs: Dict[str, Any] = {k: v for k, v in kwargs.items() if k != "model"}
+    def __init__(self, kwargs: Dict[str, Any]) -> None:
+        # 1) model を退避（OpenAI SDK の __init__ 引数ではない）
+        self.model: str = kwargs.pop("model", "")
 
-    @property
-    def llm_type(self) -> str:
-        return "AsyncOpenAI"
+        # 2) base_url の調整：host/port から組み立てる（渡されていれば優先）
+        base_url: Optional[str] = kwargs.pop("base_url", None)
+        host: Optional[str] = kwargs.pop("host", None)
+        port: Optional[int] = kwargs.pop("port", None)
+        if not base_url:
+            if host and port:
+                base_url = f"http://{host}:{port}/v1"
+            elif host and not port:
+                base_url = f"http://{host}/v1"
+        # fallback
+        if not base_url:
+            # 環境に応じて既定を調整（ローカル vLLM なら 8000 が多い）
+            base_url = "http://localhost:8000/v1"
 
-    async def __call__(
-        self,
-        messages: List[Dict[str, str]],
-        *,
-        structured_schema: Optional[Dict[str, Any]] = None,  # dict/tuple 用スキーマ or None
-        guided_backend: str = "lm-format-enforcer",
-        **kwargs: Any,
-    ):
+        # 3) API キー（vLLM ならダミーでも可）
+        api_key: str = kwargs.pop("api_key", "EMPTY")
+
+        # 4) ここで SDK を初期化（port は __init__ に渡さない！）
+        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+        # 5) その他の既定パラメータ（温度など）は保持しておき、呼び出し時にマージ
+        self.default_kwargs: Dict[str, Any] = kwargs
+
+    async def __call__(self, *, messages, **kwargs):
         """
-        非同期で Chat Completions を呼ぶ。structured_schema が与えられたら
-        vLLM の guided decoding（構造化出力）を extra_body で有効化する。
+        Chat Completions を叩く薄いラッパ。
+        controller 側から渡された extra_body（guided_json など）もそのまま通す。
         """
-        # Mixtralだけメッセージ順の例外処理（既存ロジックを踏襲）
-        if self.model == "mistralai/Mixtral-8x7B-Instruct-v0.1" and len(messages) >= 2:
-            user_message = messages.pop()
-            assistant_message = messages.pop()
-            assistant_message["role"] = "assistant"
-            messages.append(user_message)
-            messages.append(assistant_message)
+        # 呼び出し毎の上書き
+        call_kwargs = {**self.default_kwargs, **kwargs}
 
-        # 既定パラメータと呼び出し時パラメータを合成
-        call_kwargs: Dict[str, Any] = {**self.default_kwargs, **kwargs}
-        # Model は明示優先、なければ保持している self.model を使う
-        call_kwargs.setdefault("model", self.model)
+        # extra_body が無ければ明示的に渡さない（None を渡すとSDKが嫌がる場合があるため）
+        extra_body = call_kwargs.pop("extra_body", None)
 
-        # guided decoding 用の extra（vLLM拡張）をマージ
-        extra_body = _build_extra_body(structured_schema, guided_backend)
-        if extra_body:
-            # 呼び出し元が渡した extra_body を優先（互換重視）
-            caller_extra = call_kwargs.get("extra_body", {})
-            merged = dict(extra_body)
-            merged.update(caller_extra)  # ← 衝突時は呼び出し元の値を採用
-            call_kwargs["extra_body"] = merged
-
-        result = self.client.chat.completions.create(
+        return await self.client.chat.completions.create(
+            model=self.model,
             messages=messages,
             **call_kwargs,
+            **({"extra_body": extra_body} if extra_body else {}),
         )
-        if inspect.isawaitable(result):
-            result = await result
-        return result
