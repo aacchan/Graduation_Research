@@ -47,12 +47,12 @@ class AsyncChatLLM:
         payload: Dict[str, Any] = {**self.default_kwargs, **kwargs}
 
         # OpenAI SDK が受け付けない / ここで使うべきでないキーを除去
-        # 例: main.py 側から混入しがちな 'version' など
         DENY_KEYS = {
             "version",        # OpenAI SDK の引数には無い
             "host", "port",   # 接続は base_url へ集約済み
             "api_base", "base_url",
             "api_key",        # SDK 初期化で使用済み
+            "structured_schema",  # ← これを追加！(犯人)
         }
         for k in list(payload.keys()):
             if k in DENY_KEYS:
