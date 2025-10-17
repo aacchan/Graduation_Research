@@ -1,10 +1,6 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-from typing import Any, Dict, Optional
-import re
-import httpx
-from openai import AsyncOpenAI
+# llm_plan/controller/async_llm.py
 
+from urllib.parse import urlparse, urlunparse
 
 def _normalize_base_url(base_url: Optional[str], host: Optional[str], port: Optional[int], scheme: str) -> str:
     # 0.0.0.0 は接続不可なので 127.0.0.1 へ
@@ -22,83 +18,29 @@ def _normalize_base_url(base_url: Optional[str], host: Optional[str], port: Opti
     if not re.match(r"^https?://", base_url):
         base_url = "http://" + base_url.lstrip("/")
 
-    # パス末尾に /v1 が無ければ付ける
-    if not re.search(r"/v1/?$", base_url):
-        # 末尾スラッシュ調整
-        base_url = base_url.rstrip("/") + "/v1"
+    # URL を構造的に解析して補正
+    p = urlparse(base_url)
 
-    return base_url
+    # ホスト名の補正（0.0.0.0 → 127.0.0.1）
+    hostname = p.hostname or "127.0.0.1"
+    if hostname == "0.0.0.0":
+        hostname = "127.0.0.1"
 
+    # ポート補正：localhost/127.0.0.1 でポート未指定なら 8000 を補う（http の既定80回避）
+    final_port = p.port
+    if final_port is None and hostname in ("localhost", "127.0.0.1") and (p.scheme or "http") == "http":
+        final_port = 8000
 
-class AsyncChatLLM:
-    """
-    OpenAI SDK (vLLM互換API含む) ラッパ
-    - host/port/scheme を base_url に正規化（/v1 を強制）
-    - api_key 未指定なら 'EMPTY'
-    - SDK初期化引数と create() 引数をホワイトリストで安全化
-    - structured_schema -> extra_body.guided_json へ吸収
-    """
+    # パス補正：末尾に /v1 を付ける
+    path = p.path or ""
+    if not path.endswith("/v1"):
+        # 既に /v1/ のような末尾でも OK にする
+        if not path.endswith("/v1/"):
+            path = path.rstrip("/") + "/v1"
 
-    def __init__(self, kwargs: Dict[str, Any]):
-        # model は SDK 初期化パラメータではない
-        self.model: Optional[str] = kwargs.pop("model", None)
+    # 再構築
+    netloc = f"{hostname}:{final_port}" if final_port else hostname
+    fixed = p._replace(scheme=(p.scheme or "http"), netloc=netloc, path=path)
+    return urlunparse(fixed)
 
-        # host/port/scheme を取得（scheme 既定 http）
-        base_url: Optional[str] = kwargs.get("base_url")
-        host: Optional[str] = kwargs.pop("host", None)
-        port: Optional[int] = kwargs.pop("port", None)
-        scheme: str = kwargs.pop("scheme", "http")
-
-        # base_url 正規化（/v1 付加・0.0.0.0 補正等）
-        base_url = _normalize_base_url(base_url, host, port, scheme)
-        kwargs["base_url"] = base_url
-
-        # vLLM 用のデフォルト API キー
-        kwargs.setdefault("api_key", "EMPTY")
-
-        # SDK __init__ の許可キーのみ通す
-        allowed_init = {
-            "api_key", "organization", "project",
-            "base_url", "timeout", "max_retries",
-            "default_headers", "default_query", "http_client",
-        }
-        client_kwargs = {k: v for k, v in kwargs.items() if k in allowed_init}
-
-        # プロキシ無効 & タイムアウト
-        client_kwargs.setdefault("http_client", httpx.AsyncClient(trust_env=False, timeout=30.0))
-
-        print(f"[AsyncChatLLM] base_url={client_kwargs.get('base_url')}, model={self.model}")
-        self.client = AsyncOpenAI(**client_kwargs)
-
-    async def __call__(self, *, messages, **kwargs):
-        """
-        OpenAI Chat Completions 互換呼び出し
-        - model: 指定なければ self.model
-        - structured_schema: extra_body.guided_json へ吸収（互換）
-        - extra_body: guided_json/guided_decoding_backend 等を透過
-        """
-        model = kwargs.pop("model", self.model)
-
-        # 互換: structured_schema を extra_body に移す
-        schema = kwargs.pop("structured_schema", None)
-        extra_body = kwargs.pop("extra_body", None) or {}
-        if schema is not None:
-            extra_body["guided_json"] = schema
-            extra_body.setdefault("guided_decoding_backend", "lm-format-enforcer")
-
-        # create() の許可キーのみ通す
-        allowed_create = {
-            "temperature", "top_p", "n", "stream", "stop", "max_tokens",
-            "presence_penalty", "frequency_penalty", "logit_bias",
-            "user", "seed", "tools", "tool_choice", "functions", "function_call",
-            "response_format", "logprobs", "top_logprobs",
-        }
-        filtered = {k: v for k, v in kwargs.items() if k in allowed_create}
-
-        return await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            extra_body=extra_body or None,
-            **filtered
-        )
 
