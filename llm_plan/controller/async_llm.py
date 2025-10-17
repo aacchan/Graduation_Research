@@ -10,8 +10,8 @@ class AsyncChatLLM:
     OpenAI SDK (vLLM互換API含む) をラップする薄いクラス。
 
     - host/port/scheme を base_url に正規化
-    - api_key 未指定なら vLLM 用に 'EMPTY' を採用（OpenAI互換サーバで動作）
-    - model は self.model に保持
+    - api_key 未指定なら vLLM 用に 'EMPTY' を採用
+    - SDKの __init__ に渡す引数はホワイトリストで制限（未知キーを落とす）
     - 呼び出し時の extra_body をそのまま透過（guided_json 等）
     """
 
@@ -31,8 +31,16 @@ class AsyncChatLLM:
         # 3) vLLM 用のデフォルト API キー
         kwargs.setdefault("api_key", "EMPTY")
 
-        # 4) AsyncOpenAI は host/port を受け付けないので渡さない
-        self.client = AsyncOpenAI(**kwargs)
+        # 4) AsyncOpenAI が受け付けるキーだけを通す（ホワイトリスト）
+        allowed = {
+            "api_key", "organization", "project",
+            "base_url", "timeout", "max_retries",
+            "default_headers", "default_query", "http_client",
+        }
+        client_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+
+        # 5) 初期化
+        self.client = AsyncOpenAI(**client_kwargs)
 
     async def __call__(self, *, messages, **kwargs):
         """
@@ -48,4 +56,5 @@ class AsyncChatLLM:
             extra_body=extra_body,
             **kwargs
         )
+
 
