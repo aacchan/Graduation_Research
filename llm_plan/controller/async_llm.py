@@ -27,6 +27,8 @@ class AsyncChatLLM:
         if not base_url and host:
             base_url = f"{scheme}://{host}{f':{port}' if port else ''}/v1"
             kwargs["base_url"] = base_url
+        print(f"[AsyncChatLLM] base_url={client_kwargs.get('base_url')}, model={self.model}")
+
 
         # 3) vLLM 用のデフォルト API キー
         kwargs.setdefault("api_key", "EMPTY")
