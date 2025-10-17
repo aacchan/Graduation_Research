@@ -12,7 +12,7 @@ class AsyncChatLLM:
     - host/port/scheme を base_url に正規化
     - api_key 未指定なら vLLM 用に 'EMPTY' を採用
     - SDKの __init__ に渡す引数はホワイトリストで制限（未知キーを落とす）
-    - 呼び出し時の extra_body をそのまま透過（guided_json 等）
+    - 呼び出し時: structured_schema を extra_body.guided_json に変換して透過
     """
 
     def __init__(self, kwargs: Dict[str, Any]):
@@ -46,15 +46,38 @@ class AsyncChatLLM:
         """
         OpenAI Chat Completions 互換の呼び出し。
         - model: 指定が無ければ self.model を使う
+        - structured_schema: もし渡されても extra_body.guided_json に変換して受け入れる
         - extra_body: guided_json / guided_decoding_backend などを透過
+        - その他の引数は create() が受け取れるものだけにフィルタ
         """
         model = kwargs.pop("model", self.model)
-        extra_body = kwargs.pop("extra_body", None)
+
+        # 旧/他経路のための互換: structured_schema を extra_body へ吸収
+        schema = kwargs.pop("structured_schema", None)
+        extra_body = kwargs.pop("extra_body", None) or {}
+        if schema is not None:
+            extra_body["guided_json"] = schema
+            # backend が未指定ならデフォルト補完（必要に応じて調整）
+            extra_body.setdefault("guided_decoding_backend", "lm-format-enforcer")
+
+        # create() が受け付けるパラメータだけ通す（最低限のホワイトリスト）
+        allowed_create = {
+            "messages",  # 実際には位置引数で渡しているが統一のため残す
+            "temperature", "top_p", "n", "stream", "stop", "max_tokens",
+            "presence_penalty", "frequency_penalty", "logit_bias",
+            "user", "seed",
+            # OpenAI SDK v1 の追加オプション類（必要に応じて拡張）
+            "tools", "tool_choice", "functions", "function_call",
+            "response_format", "logprobs", "top_logprobs",
+        }
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_create}
+
         return await self.client.chat.completions.create(
             model=model,
             messages=messages,
-            extra_body=extra_body,
-            **kwargs
+            extra_body=extra_body or None,
+            **filtered_kwargs
         )
+
 
 
