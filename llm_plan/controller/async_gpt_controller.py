@@ -1,40 +1,41 @@
-# llm_plan/controller/async_gpt_controller.py
+# --- PATCH BEGIN (async_gpt_controller.py) ---
 from typing import Any, Dict, List, Optional, Union
 import asyncio
 import re
 from llm_plan.structured_schemas import get_schema
 
-def _base_model(name: str) -> str:
-    # 末尾が -YYYY-MM-DD のモデル名は家族名に丸める（例: gpt-4o-2024-08-06 → gpt-4o）
-    return re.sub(r"-20\d{2}-\d{2}-\d{2}$", "", (name or ""))
+# 旧は正規化なし。normalize はやめて素通しに（コスト計算互換のため）
+def _base_model_passthrough(name: str) -> str:
+    return name or ""
 
+# 旧のコスト表に合わせてキーを網羅（新旧どちらでも 0 にならないよう追加）
 MODEL_COST_PER_INPUT = {
-    "gpt-4": 3e-05,
-    "gpt-4-0613": 3e-05,
-    "gpt-4o": 1e-05,
-    "gpt-4-0125-preview": 1e-05,
-    "gpt-4o-2024-05-13": 5e-06,
-    "gpt-3.5-turbo-1106": 1e-06,
-    "meta-llama/Llama-3.1-8B-Instruct": 0.0,
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": 0.0,
+    'gpt-4': 3e-05,
+    'gpt-4-0613': 3e-05,
+    'gpt-4-1106-preview': 1e-05,
+    'gpt-4-0125-preview': 1e-05,
+    'gpt-4o-2024-05-13': 5e-06,
+    'gpt-3.5-turbo-1106': 1e-06,
+    'meta-llama/Meta-Llama-3-70B-Instruct': 0.0,
+    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
+    'mistralai/Mixtral-8x7B-Instruct-v0.1': 0.0,
 }
-MODEL_COST_PER_INPUT.setdefault("gpt-4o-2024-08-06", MODEL_COST_PER_INPUT.get("gpt-4o", 0.0))
-
 MODEL_COST_PER_OUTPUT = {
-    "gpt-4": 6e-05,
-    "gpt-4-0613": 6e-05,
-    "gpt-4o": 3e-05,
-    "gpt-4-0125-preview": 3e-05,
-    "gpt-4o-2024-05-13": 1.5e-05,
-    "gpt-3.5-turbo-1106": 2e-06,
-    "meta-llama/Llama-3.1-8B-Instruct": 0.0,
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": 0.0,
+    'gpt-4': 6e-05,
+    'gpt-4-0613': 6e-05,
+    'gpt-4-1106-preview': 3e-05,
+    'gpt-4-0125-preview': 3e-05,
+    'gpt-4o-2024-05-13': 1.5e-05,
+    'gpt-3.5-turbo-1106': 2e-06,
+    'meta-llama/Meta-Llama-3-70B-Instruct': 0.0,
+    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
+    'mistralai/Mixtral-8x7B-Instruct-v0.1': 0.0,
 }
-MODEL_COST_PER_OUTPUT.setdefault("gpt-4o-2024-08-06", MODEL_COST_PER_OUTPUT.get("gpt-4o", 0.0))
 
 class AsyncGPTController:
     """
-    LLM wrapper for async API calls (with optional structured outputs).
+    gpt-4 LLM wrapper for async API calls.
+    （force="dict"/"tuple" の時だけ guided を付与。none は旧互換で素通し）
     """
     def __init__(self, llm: Any, model_id: str, **model_args) -> None:
         self.llm = llm
@@ -45,8 +46,8 @@ class AsyncGPTController:
         self.guided_backend: str = "lm-format-enforcer"
 
     def calc_cost(self, response) -> float:
-        raw = getattr(response, "model", None) or getattr(self, "model", None) or ""
-        model_name = _base_model(raw)
+        # 旧互換: response.model を素直にキーに使う（正規化しない）
+        model_name = _base_model_passthrough(getattr(response, 'model', None))
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
         return (
@@ -67,13 +68,13 @@ class AsyncGPTController:
         *,
         force: str = "none",  # "dict" | "tuple" | "none"
     ) -> Any:
+        # 旧互換: ここで勝手に top_p=0.9 を入れない（model_args の指定があればそれが使われる）
         base_args = dict(self.model_args)
-        base_args["temperature"] = temperature
-        base_args["top_p"] = 0.9
-        base_args["model"] = self.llm.model
+        base_args['temperature'] = temperature
+        base_args['model'] = self.llm.model
 
         schema: Optional[Dict[str, Any]] = get_schema(force if force in ("dict", "tuple") else "none")
-        # self.llm は structured_schema=None を無視できる実装（async_llm.py）
+        # self.llm は structured_schema=None を無視（async_llm.py 側）
         return await self.llm(messages=messages, structured_schema=schema, **base_args)
 
     async def run(
@@ -82,20 +83,24 @@ class AsyncGPTController:
         message: str,
         temperature: float,
         *,
-        force: str = "none",  # "dict" | "tuple" | "none"
+        force: str = "none",
     ) -> Union[str, List[str]]:
         messages = self.get_prompt(system_message=expertise, user_message=message)
         response = await self.get_response(messages=messages, temperature=temperature, force=force)
-
         cost = self.calc_cost(response=response)
-        print(f"Cost for running {self.llm.model}: {cost}")
+
+        # 旧互換: model は self.model_args の値を優先（無ければ llm.model）
+        model_for_log = self.model_args.get('model', self.llm.model)
+        print(f"Cost for running {model_for_log}: {cost}")
 
         if len(response.choices) == 1:
             response_str: Union[str, List[str]] = response.choices[0].message.content
         else:
             response_str = [c.message.content for c in response.choices]
 
-        full_response = {"response": response, "response_str": response_str, "cost": cost}
+        full_response = {'response': response, 'response_str': response_str, 'cost': cost}
         self.total_inference_cost += cost
         self.all_responses.append(full_response)
-        return full_response["response_str"]
+        return full_response['response_str']
+# --- PATCH END (async_gpt_controller.py) ---
+
