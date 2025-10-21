@@ -1,14 +1,9 @@
-# --- PATCH BEGIN (async_gpt_controller.py) ---
+# llm_plan/controller/async_gpt_controller.py
 from typing import Any, Dict, List, Optional, Union
 import asyncio
-import re
 from llm_plan.structured_schemas import get_schema
 
-# 旧は正規化なし。normalize はやめて素通しに（コスト計算互換のため）
-def _base_model_passthrough(name: str) -> str:
-    return name or ""
-
-# 旧のコスト表に合わせてキーを網羅（新旧どちらでも 0 にならないよう追加）
+# Old behavior: no model name normalization for cost table keys
 MODEL_COST_PER_INPUT = {
     'gpt-4': 3e-05,
     'gpt-4-0613': 3e-05,
@@ -17,8 +12,8 @@ MODEL_COST_PER_INPUT = {
     'gpt-4o-2024-05-13': 5e-06,
     'gpt-3.5-turbo-1106': 1e-06,
     'meta-llama/Meta-Llama-3-70B-Instruct': 0.0,
-    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
     'mistralai/Mixtral-8x7B-Instruct-v0.1': 0.0,
+    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
 }
 MODEL_COST_PER_OUTPUT = {
     'gpt-4': 6e-05,
@@ -28,15 +23,12 @@ MODEL_COST_PER_OUTPUT = {
     'gpt-4o-2024-05-13': 1.5e-05,
     'gpt-3.5-turbo-1106': 2e-06,
     'meta-llama/Meta-Llama-3-70B-Instruct': 0.0,
-    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
     'mistralai/Mixtral-8x7B-Instruct-v0.1': 0.0,
+    'meta-llama/Llama-3.1-8B-Instruct': 0.0,
 }
 
 class AsyncGPTController:
-    """
-    gpt-4 LLM wrapper for async API calls.
-    （force="dict"/"tuple" の時だけ guided を付与。none は旧互換で素通し）
-    """
+    """LLM wrapper for async API calls (guided decoding optional)."""
     def __init__(self, llm: Any, model_id: str, **model_args) -> None:
         self.llm = llm
         self.model_id = model_id
@@ -46,8 +38,7 @@ class AsyncGPTController:
         self.guided_backend: str = "lm-format-enforcer"
 
     def calc_cost(self, response) -> float:
-        # 旧互換: response.model を素直にキーに使う（正規化しない）
-        model_name = _base_model_passthrough(getattr(response, 'model', None))
+        model_name = getattr(response, 'model', '') or ''
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
         return (
@@ -61,35 +52,21 @@ class AsyncGPTController:
             {"role": "user", "content": user_message},
         ]
 
-    async def get_response(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        *,
-        force: str = "none",  # "dict" | "tuple" | "none"
-    ) -> Any:
-        # 旧互換: ここで勝手に top_p=0.9 を入れない（model_args の指定があればそれが使われる）
+    async def get_response(self, messages: List[Dict[str, str]], temperature: float, *, force: str = "none") -> Any:
+        # Old behavior: do not inject top_p unless provided via model_args
         base_args = dict(self.model_args)
         base_args['temperature'] = temperature
         base_args['model'] = self.llm.model
 
         schema: Optional[Dict[str, Any]] = get_schema(force if force in ("dict", "tuple") else "none")
-        # self.llm は structured_schema=None を無視（async_llm.py 側）
         return await self.llm(messages=messages, structured_schema=schema, **base_args)
 
-    async def run(
-        self,
-        expertise: str,
-        message: str,
-        temperature: float,
-        *,
-        force: str = "none",
-    ) -> Union[str, List[str]]:
+    async def run(self, expertise: str, message: str, temperature: float, *, force: str = "none") -> Union[str, List[str]]:
         messages = self.get_prompt(system_message=expertise, user_message=message)
         response = await self.get_response(messages=messages, temperature=temperature, force=force)
         cost = self.calc_cost(response=response)
 
-        # 旧互換: model は self.model_args の値を優先（無ければ llm.model）
+        # Old-style logging prefers the model from model_args (if present)
         model_for_log = self.model_args.get('model', self.llm.model)
         print(f"Cost for running {model_for_log}: {cost}")
 
@@ -102,5 +79,22 @@ class AsyncGPTController:
         self.total_inference_cost += cost
         self.all_responses.append(full_response)
         return full_response['response_str']
-# --- PATCH END (async_gpt_controller.py) ---
+
+    # === old-compatible batch APIs ===
+    async def batch_prompt_sync(self, expertise: str, messages: List[str], temperature: float, *, force: str="none") -> List[str]:
+        coros = [self.run(expertise, m, temperature, force=force) for m in messages]
+        return await asyncio.gather(*coros)
+
+    def batch_prompt(self, expertise: str, messages: List[str], temperature: float, *, force: str="none") -> List[str]:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            raise RuntimeError("Loop is already running.")
+        return loop.run_until_complete(self.batch_prompt_sync(expertise, messages, temperature, force=force))
+
+    async def async_batch_prompt(self, expertise: str, messages: List[str], temperature: Optional[float]=None, *, force: str="none") -> List[str]:
+        if temperature is None:
+            temperature = self.model_args.get("temperature", 0.2)
+        coros = [self.run(expertise, m, temperature, force=force) for m in messages]
+        return await asyncio.gather(*coros)
+
 
