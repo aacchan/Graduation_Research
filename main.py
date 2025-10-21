@@ -38,7 +38,7 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
             'base_url': "http://localhost",
             'port': 8000,
             'version': 'v1',
-            'model': 'meta-llama/Llama-3.1-8B-Instruct'
+            'model': 'meta-llama/Llama-3-8B-Instruct'
         }
         llm = AsyncChatLLM(kwargs=kwargs)
         controller = AsyncGPTController(
@@ -113,7 +113,7 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
         }
     elif llm_type == 'llama3':
         model_settings = {
-            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3-8B-Instruct",
             "max_tokens": 2000,
             "temperature": 0.2,
             "top_p": 1.0,
