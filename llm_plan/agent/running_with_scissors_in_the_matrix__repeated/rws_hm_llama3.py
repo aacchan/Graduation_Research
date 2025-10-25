@@ -517,7 +517,7 @@ class DecentralizedAgent(abc.ABC):
     async def subgoal_module(self, state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=False):
         user_message = self.generate_feedback_user_message(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
         responses = await asyncio.gather(
-            *[self.controller.async_batch_prompt(self.system_message, [user_message])]
+            *[self.controller.async_batch_prompt(self.system_message, [user_message], force="dict")]
         )
         subgoal_response = responses[0][0]  
         subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
@@ -530,7 +530,7 @@ class DecentralizedAgent(abc.ABC):
             user_message = self.generate_feedback_user_message(state, plan_response, get_action_from_response_errors, reward_tracker, step)
             plan_response = plan_response + user_message
             responses = await asyncio.gather(
-                *[self.controller.async_batch_prompt(self.system_message, [plan_response])]
+                *[self.controller.async_batch_prompt(self.system_message, [plan_response], force="dict")]
             )
             subgoal_response = responses[0][0]
             subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
