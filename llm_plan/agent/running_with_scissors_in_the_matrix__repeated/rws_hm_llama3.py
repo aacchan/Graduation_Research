@@ -519,7 +519,6 @@ class DecentralizedAgent(abc.ABC):
         responses = await asyncio.gather(
             *[self.controller.async_batch_prompt(self.system_message, [user_message], force="dict")]
         )
-        )
         subgoal_response = responses[0][0]  
         subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
         #goal_and_plan = self.extract_goals_and_actions(subgoal_response)
