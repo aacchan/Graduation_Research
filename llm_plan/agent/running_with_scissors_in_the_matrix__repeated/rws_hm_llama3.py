@@ -1,3 +1,4 @@
+import json
 import re
 import abc
 import ast
@@ -517,9 +518,9 @@ class DecentralizedAgent(abc.ABC):
     async def subgoal_module(self, state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=False):
         user_message = self.generate_feedback_user_message(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
         responses = await asyncio.gather(
-            *[self.controller.async_batch_prompt(self.system_message, [user_message], force="dict")]
+            *[self.controller.async_batch_prompt(self.system_message, [user_message], force="subgoal")]
         )
-        subgoal_response = responses[0][0]  
+        subgoal_response = responses[0][0]
         subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
         #goal_and_plan = self.extract_goals_and_actions(subgoal_response)
         # check that this is a valid plan
@@ -530,7 +531,7 @@ class DecentralizedAgent(abc.ABC):
             user_message = self.generate_feedback_user_message(state, plan_response, get_action_from_response_errors, reward_tracker, step)
             plan_response = plan_response + user_message
             responses = await asyncio.gather(
-                *[self.controller.async_batch_prompt(self.system_message, [plan_response], force="dict")]
+                *[self.controller.async_batch_prompt(self.system_message, [plan_response], force="subgoal")]
             )
             subgoal_response = responses[0][0]
             subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
@@ -634,51 +635,49 @@ class DecentralizedAgent(abc.ABC):
             return '', {}
 
 
-    def extract_dict(self, response):
+    def extract_dict(self, response: str):
         try:
-            # Find the start of the dictionary by looking for the "```python\n" or "\n```" delimiter
-            start_marker = "```python\n"
-            end_marker = "\n```"
-            start_index = response.find(start_marker)
-            if start_index != -1:
-                start_index += len(start_marker)
-            else:
-                # If "```python\n" is not found, look for "\n```"
-                start_marker = "\n```\n"
-                end_marker = "```"
-                start_index = response.find(start_marker)
-                if start_index != -1:
-                    start_index += len(start_marker)
-                else:
-                    raise ValueError("Python dictionary markers not found in GPT-4's response.")
-            
-            end_index = response.find(end_marker, start_index)
-            if end_index == -1:
-                raise ValueError("Python dictionary markers not found in GPT-4's response.")
-            
-            dict_str = response[start_index: end_index].strip()
+            s = (response or "").strip()
 
-            # Process each line, skipping lines that are comments
-            lines = dict_str.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                # Check if line contains a comment
-                comment_index = line.find('#')
-                if comment_index != -1:
-                    # Exclude the comment part
-                    line = line[:comment_index].strip()
-                if line:  # Add line if it's not empty
-                    cleaned_lines.append(line)
+            # 余計な思考断片を除去（あれば）
+            s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL).strip()
 
-            # Reassemble the cleaned string
-            cleaned_dict_str = ' '.join(cleaned_lines)
-            
-            # Convert the string representation of a dictionary into an actual dictionary
-            extracted_dict = ast.literal_eval(cleaned_dict_str)
-            return extracted_dict
+            # コードフェンス除去（```json / ```python / ```）
+            if s.startswith("```"):
+                m = re.match(r"^```[a-zA-Z]*\n(.*?)\n```", s, flags=re.DOTALL)
+                if m:
+                    s = m.group(1).strip()
+
+            # 1) まず JSON として試す（素の JSON / ```json``` の両対応）
+            try:
+                obj = json.loads(s)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+
+            # 2) 本文にゴミが混じる場合に備えて {} の最外殻を抽出して再挑戦
+            i, j = s.find("{"), s.rfind("}")
+            if 0 <= i < j:
+                cand = s[i:j+1]
+                for parser in (json.loads, ast.literal_eval):
+                    try:
+                        obj = parser(cand)
+                        if isinstance(obj, dict):
+                            return obj
+                    except Exception:
+                        continue
+
+            # 3) 最後の手段：全体を Python リテラルとして解釈
+            obj = ast.literal_eval(s)
+            if isinstance(obj, dict):
+                return obj
+
         except Exception as e:
-            print(f"Error parsing dictionary: {e}")
-            return {}
+            print(f"Error parsing dictionary (robust): {e}")
+
+        # 失敗時は空 dict
+        return {}
 
     def extract_goals_and_actions(self, response):
         goals_and_actions = self.extract_dict(response)
