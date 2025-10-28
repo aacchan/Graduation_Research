@@ -52,14 +52,22 @@ class AsyncGPTController:
             {"role": "user", "content": user_message},
         ]
 
-    async def get_response(self, messages: List[Dict[str, str]], temperature: float, *, force: str = "none") -> Any:
-        # Old behavior: do not inject top_p unless provided via model_args
-        base_args = dict(self.model_args)
-        base_args['temperature'] = temperature
-        base_args['model'] = self.llm.model
+async def get_response(
+    self,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    *,
+    force: str = "none",  # "dict" | "tuple" | "subgoal" | "none"
+) -> Any:
+    # 旧互換: こちらから勝手に top_p を入れない（model_args があれば尊重）
+    base_args = dict(self.model_args)
+    base_args['temperature'] = temperature
+    base_args['model'] = self.llm.model
 
-        schema: Optional[Dict[str, Any]] = get_schema(force if force in ("dict", "tuple") else "none")
-        return await self.llm(messages=messages, structured_schema=schema, **base_args)
+    # ★ subgoal を許可
+    schema: Optional[Dict[str, Any]] = get_schema(force if force in ("dict", "tuple", "subgoal") else "none")
+    return await self.llm(messages=messages, structured_schema=schema, **base_args)
+
 
     async def run(self, expertise: str, message: str, temperature: float, *, force: str = "none") -> Union[str, List[str]]:
         messages = self.get_prompt(system_message=expertise, user_message=message)
