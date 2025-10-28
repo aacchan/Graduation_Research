@@ -12,6 +12,11 @@ from llm_plan.env.mp_llm_env import MeltingPotLLMEnv
 from llm_plan.controller.async_llm import AsyncChatLLM
 from llm_plan.controller.async_gpt_controller import AsyncGPTController
 
+import llm_plan.controller.async_gpt_controller as _agc
+print("[DEBUG] AGC file:", _agc.__file__)
+print("[DEBUG] has AsyncGPTController:", hasattr(_agc, "AsyncGPTController"))
+print("[DEBUG] has async_batch_prompt:", hasattr(_agc.AsyncGPTController, "async_batch_prompt"))
+
 def setup_environment(substrate_name, scenario_num):
     sprite_label_path = f'./llm_plan/sprite_labels/{substrate_name}'
     env = MeltingPotLLMEnv(substrate_name, sprite_label_path, scenario_num)
