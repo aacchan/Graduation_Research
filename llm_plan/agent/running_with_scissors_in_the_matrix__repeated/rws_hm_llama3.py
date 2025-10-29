@@ -525,7 +525,9 @@ class DecentralizedAgent(abc.ABC):
                     counter += 1
                 # add response to hls after two new lines
                 hls_response = hls_response + '\n\n' + response
-                subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
+                subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+                )
             else:
                 # skip asking about opponent's strategy when we have a good hypothesis
                 # Sort the keys of self.opponent_hypotheses based on 'value', in descending order
