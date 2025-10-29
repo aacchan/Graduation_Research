@@ -10,37 +10,30 @@ from typing import List, Dict, Any, Tuple, Optional
 
 from llm_plan.agent import action_funcs
 
+
 def _parse_json_like_object(text: str) -> dict:
     """JSON優先＋フォールバックで dict を取り出す。前後の説明やコードフェンスに耐性あり。"""
-    # コードフェンス除去
     text = re.sub(r"```(?:json|python)?\s*|```", "", str(text), flags=re.I).strip()
-    # 最初の { ... } を抽出
     m = re.search(r"\{.*\}", text, flags=re.S)
     if not m:
         raise ValueError("No JSON object braces found in LLM output.")
     blob = m.group(0).strip()
-    # JSON を優先
     try:
         return json.loads(blob)
     except Exception:
         pass
-    # Python リテラル
     try:
         return ast.literal_eval(blob)
     except Exception:
         pass
-    # よくある ' と " の混在を軽く補正して再挑戦
     return json.loads(re.sub(r"'", '"', blob))
 
+
 class DecentralizedAgent(abc.ABC):
-    def __init__(
-            self, 
-            config: Dict[str, Any],
-            controller: Any,
-            ) -> None:
-        self.agent_id = config['agent_id']
+    def __init__(self, config: Dict[str, Any], controller: Any) -> None:
+        self.agent_id = config["agent_id"]
         self.config = config
-        self.controller = controller        
+        self.controller = controller
         self.all_actions = Queue()
         self.generate_system_message()
         self.memory_states = {}
@@ -49,15 +42,37 @@ class DecentralizedAgent(abc.ABC):
         self.opponent_hypotheses = {}
         self.interaction_num = 0
         self.good_hypothesis_found = False
-        self.alpha = 0.3 # learning rate for updating hypothesis values
+        self.alpha = 0.3  # learning rate for updating hypothesis values
         self.correct_guess_reward = 1
         self.good_hypothesis_thr = 0.7
-        self.top_k = 5 # number of top hypotheses to evaluate
-        self.self_improve = config['self_improve']
+        self.top_k = 5  # number of top hypotheses to evaluate
+        self.self_improve = config.get("self_improve", False)
+        self.temperature = config.get("temperature", 0.2)  # ★ 追加：デフォルト温度
         player_key = self.agent_id
-        opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
-        for entity_type in ['yellow_box', 'blue_box', 'purple_box', 'ground', player_key, opponent_key]:
+        opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
+        for entity_type in [
+            "yellow_box",
+            "blue_box",
+            "purple_box",
+            "ground",
+            player_key,
+            opponent_key,
+        ]:
             self.memory_states[entity_type] = []
+
+        # 初期値（初回の subgoal で参照されるため）
+        self.next_inventories = {
+            "my_next_inventory": {
+                "rock/yellow": 1,
+                "paper/purple": 1,
+                "scissors/blue": 1,
+            },
+            "predicted_opponent_next_inventory": {
+                "rock/yellow": 1,
+                "paper/purple": 1,
+                "scissors/blue": 1,
+            },
+        }
 
     def generate_system_message(self):
         self.system_message = f"""
@@ -86,28 +101,26 @@ class DecentralizedAgent(abc.ABC):
             Given the partially-observable nature of the environment, you will need to explore the environment appropriately and select goals based on the information you've gathered.
             Also pay attention to your opponent's position when you see it in order to duel with them and gain information about their strategy.
             """
-    
+
     def generate_hls_user_message(self, state, step):
         ego_state = state[self.agent_id]
-        # Extracting information from the state
-        #map_size = "18x24"  # Assuming the map size is constant
-        map_size = "23x15"  # Assuming the map size is constant
+        map_size = "23x15"
         player_position = {k: v for k, v in ego_state.items() if k.startswith(self.agent_id)}
-        player_orientation = list(player_position.keys())[0].split('-')[-1]
-        player_inventory = list(ego_state['inventory'])
-        # get locations of non wall keys in state
+        player_orientation = list(player_position.keys())[0].split("-")[-1]
+        player_inventory = list(ego_state["inventory"])
         movable_locations = []
-        for k, v in state['global'].items():
-            if k != 'wall':
+        for k, v in state["global"].items():
+            if k != "wall":
                 for loc in v:
                     movable_locations.append(loc)
-        # movable_locations = [v for k, v in state['global'].items() if k != 'wall']
-        yellow_locations = ego_state.get('yellow_box', [])
-        blue_locations = ego_state.get('blue_box', [])
-        purple_locations = ego_state.get('purple_box', [])
-        beam_locations = ego_state.get('beam', [])
-        ground_locations = ego_state.get('ground', [])
-        opponent_locations = [v[0] for k, v in ego_state.items() if k.startswith('player_1' if self.agent_id == 'player_0' else 'player_0')]
+        yellow_locations = ego_state.get("yellow_box", [])
+        blue_locations = ego_state.get("blue_box", [])
+        purple_locations = ego_state.get("purple_box", [])
+        opponent_locations = [
+            v[0]
+            for k, v in ego_state.items()
+            if k.startswith("player_1" if self.agent_id == "player_0" else "player_0")
+        ]
 
         strategy_request = f"""
             Strategy Request:
@@ -138,59 +151,44 @@ class DecentralizedAgent(abc.ABC):
         return user_message
 
     def calculate_manhattan_distance(self, point1: Tuple[int, int], point2: Tuple[int, int]) -> int:
-        """Calculate the Manhattan distance between two points."""
         if point1 is None or point2 is None:
-            return float('inf')
+            return float("inf")
         return abs(point1[0] - point2[0]) + abs(point1[1] - point2[1])
 
     def update_memory_states_with_distance(self, current_location: Tuple[int, int]):
-        """Update memory states with distance from the current location."""
         for entity_type, locations in self.memory_states.items():
             for i, (location, step_last_observed, distance) in enumerate(locations):
                 distance = f"distance: {self.calculate_manhattan_distance(current_location, location)}"
-                # Update the tuple with the distance information
                 self.memory_states[entity_type][i] = (location, step_last_observed, distance)
-    
+
     def generate_feedback_user_message(
-            self, 
-            state,
-            execution_outcomes, 
-            get_action_from_response_errors,
-            rewards,
-            step):
+        self, state, execution_outcomes, get_action_from_response_errors, rewards, step
+    ):
         ego_state = state[self.agent_id]
-        # Extracting information from the state
-        #map_size = "18x24"  # Assuming the map size is constant
-        map_size = "23x15"  # Assuming the map size is constant
+        map_size = "23x15"
         player_position = {k: v for k, v in ego_state.items() if k.startswith(self.agent_id)}
-        player_orientation = list(player_position.keys())[0].split('-')[-1]
-        player_inventory = list(ego_state['inventory'])
-        # get locations of non wall keys in state
+        player_orientation = list(player_position.keys())[0].split("-")[-1]
+        player_inventory = list(ego_state["inventory"])
         movable_locations = []
-        for k, v in state['global'].items():
-            if k != 'wall':
+        for k, v in state["global"].items():
+            if k != "wall":
                 for loc in v:
                     movable_locations.append(loc)
 
         player_position_list = next(iter(player_position.values()))
         current_position = player_position_list[0] if player_position_list else None
-        # if current_position is not None:
-        #     self.update_memory_states_with_distance(player_position_list[0])
 
-        yellow_locations = ego_state.get('yellow_box', [])
-        blue_locations = ego_state.get('blue_box', [])
-        purple_locations = ego_state.get('purple_box', [])
-        beam_locations = ego_state.get('beam', [])
-        ground_locations = ego_state.get('ground', [])
-        opponent_locations = [v[0] for k, v in ego_state.items() if k.startswith('player_1' if self.agent_id == 'player_0' else 'player_0')]
-        
-         # Calculate the distance from the current location to the yellow, blue, and purple box locations
-        yellow_locations_with_distance = [(loc, f"distance: {self.calculate_manhattan_distance(current_position, loc)}") for loc in yellow_locations]
-        blue_locations_with_distance = [(loc, f"distance: {self.calculate_manhattan_distance(current_position, loc)}") for loc in blue_locations]
-        purple_locations_with_distance = [(loc, f"distance: {self.calculate_manhattan_distance(current_position, loc)}") for loc in purple_locations] 
+        yellow_locations = ego_state.get("yellow_box", [])
+        blue_locations = ego_state.get("blue_box", [])
+        purple_locations = ego_state.get("purple_box", [])
+        opponent_locations = [
+            v[0]
+            for k, v in ego_state.items()
+            if k.startswith("player_1" if self.agent_id == "player_0" else "player_0")
+        ]
 
         rewards_str = "\n".join(f"- {player}: {reward}" for player, reward in rewards.items())
-        
+
         strategy_request = f"""
             Strategy Request:
             You are at step {step} of the game.
@@ -234,8 +232,7 @@ class DecentralizedAgent(abc.ABC):
             The strategy should be efficient, considering the shortest paths to resources and strategic positioning for duels. 
             Format the dictionary as outlined below, listing the strategy and action plans.
             Do not use JSON or any other formatting. 
-            Actions should align with the action functions, \
-            emphasizing efficient pathfinding and playing the corresponding strategies.
+            Actions should align with the action functions, emphasizing efficient pathfinding and playing the corresponding strategies.
             Consider the entire game state to plan the most efficient paths for resource collection and strategy execution.
             To do this you will need to think step by step about what actions to output in the following format for 
             these players to efficiently collect the appropriate resources/target inventories and play their strategy.
@@ -248,7 +245,6 @@ class DecentralizedAgent(abc.ABC):
 
             Keep plans relatively short (<6 actions), especially at the early steps of an episode. You will be prompted again when the action plans are finished and more information is observed.
             """
-
         user_message = f"""Current State Description:
             - Global Map Size: {map_size} grid (Walls are located at the boundaries of the map and in other places that are invalid for move_to).
             - Valid Locations for move_to: {movable_locations}
@@ -275,10 +271,7 @@ class DecentralizedAgent(abc.ABC):
             """
         return user_message
 
-    def generate_interaction_feedback_user_message1(
-            self, 
-            step):
-        
+    def generate_interaction_feedback_user_message1(self, step):
         user_message = f"""
             An interaction with the other player has occurred at step {step}, {self.interaction_history[-1]}.
             What was my opponent's likely inventory in the last round given the inventory I played and the reward received.
@@ -296,31 +289,28 @@ class DecentralizedAgent(abc.ABC):
             'your_inventory': {{'rock/yellow': 1, 'paper/purple': 1, 'scissors/blue': 8}}, 'rewards': -4.666, 'possible_opponent_inventory': {{'rock/yellow': 7, 'paper/purple': 1, 'scissors/blue': 1}}
             In the 2nd part of your response, output the predicted opponent's inventory in following Python dictionary format, parsable by `ast.literal_eval()` starting with ```python.
             Example output:
-            Given that I last played a strong paper strategy with an inventory of {{'rock/yellow': 1, 'paper/purple': 5, 'scissors/blue': 1}} and received a reward of -3.428, I believe my opponent played a strong scissors strategy. 
-            The reward suggests that my paper was beaten by their scissors, which means their inventory likely had a higher count of blue/scissors resources. 
-            A possible inventory for them could be {{'rock/yellow': 1, 'paper/purple': 1, 'scissors/blue': 5}} or a similar distribution favoring scissors.
             ```python
             {{
               'possible_opponent_inventory': {{'rock/yellow': 1, 'paper/purple': 1, 'scissors/blue': 5}}
             }}
             ```
             """
-
         return user_message
 
-    def generate_interaction_feedback_user_message2(
-            self, 
-            total_rewards,
-            step):
+    def generate_interaction_feedback_user_message2(self, total_rewards, step):
         rewards_str = "\n".join(f"- {player}: {reward}" for player, reward in total_rewards.items())
-        # get the top N hypotheses
-        sorted_keys = sorted([key for key in self.opponent_hypotheses],
-                    key=lambda x: self.opponent_hypotheses[x]['value'], 
-                    reverse=True)
-        top_keys = sorted_keys[:self.top_k]
-        # show top hypotheses with value > 0
-        self.top_hypotheses = {key: self.opponent_hypotheses[key] for key in top_keys if self.opponent_hypotheses[key]['value'] > 0}
-        
+        sorted_keys = sorted(
+            [key for key in self.opponent_hypotheses],
+            key=lambda x: self.opponent_hypotheses[x]["value"],
+            reverse=True,
+        )
+        top_keys = sorted_keys[: self.top_k]
+        self.top_hypotheses = {
+            key: self.opponent_hypotheses[key]
+            for key in top_keys
+            if self.opponent_hypotheses[key]["value"] > 0
+        }
+
         if self.self_improve:
             strategy_request = f"""
                 An interaction with the other player has occurred at step {step}, {self.interaction_history[-1]}.
@@ -343,7 +333,6 @@ class DecentralizedAgent(abc.ABC):
                 'Opponent_strategy': 'I think my opponent is always playing a pure scissors strategy and collecting around 5 blue resources.'
                 }}
                 ```
-                
                 You will be prompted again shortly to select subgoals and action plans to execute this strategy that achieves the target inventory, so do not include that in your response yet right now.
                 """
         else:
@@ -365,7 +354,6 @@ class DecentralizedAgent(abc.ABC):
                 'Opponent_strategy': 'I think my opponent is always playing a pure scissors strategy and collecting around 5 blue resources.'
                 }}
                 ```
-                
                 You will be prompted again shortly to select subgoals and action plans to execute this strategy that achieves the target inventory, so do not include that in your response yet right now.
                 """
 
@@ -375,11 +363,7 @@ class DecentralizedAgent(abc.ABC):
             """
         return user_message
 
-    def generate_interaction_feedback_user_message3(
-            self, 
-            step,
-            possible_opponent_strategy=None):
-        
+    def generate_interaction_feedback_user_message3(self, step, possible_opponent_strategy=None):
         if possible_opponent_strategy is None:
             possible_opponent_strategy = self.possible_opponent_strategy
         user_message = f"""
@@ -394,332 +378,340 @@ class DecentralizedAgent(abc.ABC):
             2. 'My_next_inventory': Given the opponent's likely inventory in the next round, what should your next inventory be to counter this?
             3. In the 3rd part of your response, output the predicted opponent's next inventory and your next inventory in following Python dictionary format, parsable by `ast.literal_eval()` starting with ```python.
             Example response:
-            1. 'Opponent_next_inventory': Given that my opponent is playing a rock policy, I believe their next inventory will be inventory={{'rock/yellow': 5, 'paper/purple': 1, 'scissors/blue': 1}}.
-            2. 'My_next_inventory': Given that my opponent is playing a rock policy, I believe my next inventory should be a paper policy inventory={{'rock/yellow': 1, 'paper/purple': 5, 'scissors/blue': 1}}.
             ```python
             {{
-              'predicted_opponent_next_inventory': {{'rock/yellow': 5, 'paper/purple': 1, 'scissors/blue': 1}}
+              'predicted_opponent_next_inventory': {{'rock/yellow': 5, 'paper/purple': 1, 'scissors/blue': 1}},
               'my_next_inventory': {{'rock/yellow': 1, 'paper/purple': 5, 'scissors/blue': 1}}
             }}
             """
-
         return user_message
 
-    async def two_level_plan(self, state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=False):
+    async def two_level_plan(
+        self,
+        state,
+        execution_outcomes,
+        get_action_from_response_errors,
+        reward_tracker,
+        step,
+        after_interaction=False,
+    ):
         if after_interaction:
-            hls_user_msg = ''
-            hls_response = ''
-            hls_user_msg1 = self.generate_interaction_feedback_user_message1(step) 
-            hls_user_msg = hls_user_msg + '\n\n' + hls_user_msg1
-            # Make sure output dict syntax is correct
-            correct_syntax = False
-            counter = 0
-            while not correct_syntax and counter < 15:
-                correct_syntax = True
-                # ★ guided JSON を強制して並列実行（async_batch_promptは使わず run を直呼び）
-                coros = [
-                    self.controller.run(
-                        self.system_message, user_msg,
-                        temperature=self.temperature,
-                        force="next_inventories"  # ★ lm-format-enforcer で JSON を強制
-                    )
-                    for user_msg in user_messages
-                ]
-                results = await asyncio.gather(*coros)
+            hls_user_msg = ""
+            hls_response = ""
 
-                for i, text in enumerate(results):
-                    # run() は n>1 だと list になる場合があるので先頭を使う
-                    response_text = text[0] if isinstance(text, list) else text
-                    try:
-                        next_inventories = _parse_json_like_object(response_text)
-                    except Exception as e:
-                        correct_syntax = False
-                        print(f"Error parsing next_inventories JSON: {e}")
+            # ---- 1) opponent inventory（dict強制）----
+            msg1 = self.generate_interaction_feedback_user_message1(step)
+            ok = False
+            tries = 0
+            possible_opponent_inventory = {}
+            response_text_opp_inv = ""
+            while not ok and tries < 15:
+                text = await self.controller.run(
+                    self.system_message, msg1, temperature=self.temperature, force="dict"
+                )
+                response_text_opp_inv = text[0] if isinstance(text, list) else text
+                try:
+                    parsed = _parse_json_like_object(response_text_opp_inv)
+                    if "possible_opponent_inventory" in parsed:
+                        possible_opponent_inventory = parsed
+                        ok = True
                         break
-            
-                    both_keys_present = (
-                        ('my_next_inventory' in next_inventories) and
-                        ('predicted_opponent_next_inventory' in next_inventories)
-                    )
-                    if not both_keys_present:
-                        correct_syntax = False
-                        print("Error parsing dictionary when extracting next inventories, retrying...")
-                        break
-            
-                    if i == 0:
-                        self.next_inventories = deepcopy(next_inventories)
-                        self.opponent_hypotheses[self.interaction_num]['next_inventories'] = deepcopy(self.next_inventories)
-                        # add response to hls after two new lines
-                        hls_response = hls_response + '\n\n' + response_text
-                    else:
-                        self.opponent_hypotheses[sorted_keys[i-1]]['next_inventories'] = deepcopy(next_inventories)
-                counter += 1
-                
+                except Exception:
+                    pass
+                tries += 1
+
+            if not ok:
+                print("Error parsing opponent inventory; using empty fallback.")
+                possible_opponent_inventory = {"possible_opponent_inventory": {}}
+
             self.possible_opponent_inventory = deepcopy(possible_opponent_inventory)
-            # add response to hls after two new lines
-            hls_response = hls_response + '\n\n' + response
-            # Update last interaction_dict with the contents of possible_opponent_inventory
+            hls_response += "\n\n" + response_text_opp_inv
             self.interaction_history[-1].update(self.possible_opponent_inventory)
-            # score top hypotheses based on last interaction's possible inventory
+
             if self.interaction_num > 1:
                 self.eval_hypotheses()
+
+            # ---- 2) opponent strategy hypothesis（dict強制）----
             if not self.good_hypothesis_found:
-                hls_user_msg2 = self.generate_interaction_feedback_user_message2(reward_tracker, step) 
-                hls_user_msg = hls_user_msg + '\n\n' + hls_user_msg2
-                responses = await asyncio.gather(
-                    *[self.controller.async_batch_prompt(self.system_message, [hls_user_msg2])]
+                msg2 = self.generate_interaction_feedback_user_message2(reward_tracker, step)
+                text = await self.controller.run(
+                    self.system_message, msg2, temperature=self.temperature, force="dict"
                 )
-                response = responses[0][0]
-                #possible_opponent_strategy = self.extract_dict(response)
-                response, possible_opponent_strategy = self.parse_multiple_llm_responses(response)
-                self.possible_opponent_strategy = deepcopy(possible_opponent_strategy)
-                self.opponent_hypotheses[self.interaction_num] = deepcopy(possible_opponent_strategy)
-                # initialize the value of this hypothesis
-                self.opponent_hypotheses[self.interaction_num]['value'] = 0
-                # add response to hls after two new lines
-                top_hypotheses_summary = f"""Top hypotheses: {self.top_hypotheses}"""
-                hls_response = hls_response + '\n\n' + top_hypotheses_summary+ '\n\n' + response
+                response_text_strategy = text[0] if isinstance(text, list) else text
+                try:
+                    self.possible_opponent_strategy = _parse_json_like_object(response_text_strategy)
+                except Exception:
+                    self.possible_opponent_strategy = {"Opponent_strategy": "unknown"}
+                self.opponent_hypotheses[self.interaction_num] = deepcopy(
+                    self.possible_opponent_strategy
+                )
+                self.opponent_hypotheses[self.interaction_num]["value"] = 0
+                top_hypotheses_summary = f"Top hypotheses: {getattr(self, 'top_hypotheses', {})}"
+                hls_response = hls_response + "\n\n" + top_hypotheses_summary + "\n\n" + response_text_strategy
 
-                # predict next opponent inventory for latest hypothesis and the top 2 so far
-                hls_user_msg3 = self.generate_interaction_feedback_user_message3(step)
-                hls_user_msg = hls_user_msg + '\n\n' + hls_user_msg3
-                user_messages = [hls_user_msg3]
-                system_messages = [self.system_message for i in range(3)]
-                # Sort the keys of self.opponent_hypotheses based on 'value', in descending order
-                sorted_keys = sorted([key for key in self.opponent_hypotheses if key != self.interaction_num],
-                        key=lambda x: self.opponent_hypotheses[x]['value'], 
-                        reverse=True)
-                # Loop through the top k keys
-                for key in sorted_keys[:self.top_k]:
-                    # Access and use the key and its corresponding 'value'
-                    possible_opponent_strategy = self.opponent_hypotheses[key]
-                    hls_user_msg3 = self.generate_interaction_feedback_user_message3(step, possible_opponent_strategy)
-                    user_messages.append(hls_user_msg3)
+                # ---- 3) next_inventories（latest + top_k）（JSON強制）----
+                msg3_latest = self.generate_interaction_feedback_user_message3(step)
+                sorted_keys = sorted(
+                    [key for key in self.opponent_hypotheses if key != self.interaction_num],
+                    key=lambda x: self.opponent_hypotheses[x]["value"],
+                    reverse=True,
+                )
+                user_messages = [msg3_latest] + [
+                    self.generate_interaction_feedback_user_message3(
+                        step, self.opponent_hypotheses[key]
+                    )
+                    for key in sorted_keys[: self.top_k]
+                ]
 
-                # Make sure output dict syntax is correct
-                correct_syntax = False
-                counter = 0
-                while not correct_syntax and counter < 15:
-                    correct_syntax = True
-                    # Gathering responses asynchronously
-                    responses = await asyncio.gather(
-                        *[self.controller.async_batch_prompt(self.system_message, [user_msg]) 
-                        for user_msg in user_messages]
-                        )           
-                    for i in range(len(responses)):
-                        response = responses[i][0]
-                        #next_inventories = self.extract_dict(response)
-                        response, next_inventories = self.parse_multiple_llm_responses(response, response_type='next_inventories')
-                        both_keys_present = ('predicted_opponent_next_inventory' in next_inventories) and ('my_next_inventory' in next_inventories)
-                        if not both_keys_present:
-                            correct_syntax = False
-                            print(f"Error parsing dictionary when extracting next inventories, retrying...")
+                ok = False
+                tries = 0
+                while not ok and tries < 15:
+                    results = await asyncio.gather(
+                        *[
+                            self.controller.run(
+                                self.system_message,
+                                um,
+                                temperature=self.temperature,
+                                force="next_inventories",  # ★ structured_schemas に定義がある前提
+                            )
+                            for um in user_messages
+                        ]
+                    )
+                    ok = True
+                    for i, t in enumerate(results):
+                        response_text = t[0] if isinstance(t, list) else t
+                        try:
+                            inv = _parse_json_like_object(response_text)
+                        except Exception:
+                            ok = False
                             break
+                        if not (
+                            isinstance(inv, dict)
+                            and "my_next_inventory" in inv
+                            and "predicted_opponent_next_inventory" in inv
+                        ):
+                            ok = False
+                            break
+
                         if i == 0:
-                            self.next_inventories = deepcopy(next_inventories)
-                            self.opponent_hypotheses[self.interaction_num]['next_inventories'] = deepcopy(self.next_inventories)
-                            # add response to hls after two new lines
-                            hls_response = hls_response + '\n\n' + response
+                            self.next_inventories = deepcopy(inv)
+                            self.opponent_hypotheses[self.interaction_num]["next_inventories"] = deepcopy(inv)
+                            hls_response = hls_response + "\n\n" + response_text
                         else:
-                            self.opponent_hypotheses[sorted_keys[i-1]]['next_inventories'] = deepcopy(next_inventories)
-                    counter += 1
-                # add response to hls after two new lines
-                hls_response = hls_response + '\n\n' + response
+                            self.opponent_hypotheses[sorted_keys[i - 1]]["next_inventories"] = deepcopy(inv)
+                    tries += 1
+
+                if not ok:
+                    print("Error parsing next_inventories; using default fallback.")
+                    self.next_inventories = {
+                        "my_next_inventory": {
+                            "rock/yellow": 1,
+                            "paper/purple": 1,
+                            "scissors/blue": 1,
+                        },
+                        "predicted_opponent_next_inventory": {
+                            "rock/yellow": 1,
+                            "paper/purple": 1,
+                            "scissors/blue": 1,
+                        },
+                    }
+
                 subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(
                     state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
                 )
             else:
-                # skip asking about opponent's strategy when we have a good hypothesis
-                # Sort the keys of self.opponent_hypotheses based on 'value', in descending order
-                sorted_keys = sorted([key for key in self.opponent_hypotheses], key=lambda x: self.opponent_hypotheses[x]['value'], reverse=True)
-                # set the possible opponent strategy to the top hypothesis
+                # ---- good hypothesis path ----
+                sorted_keys = sorted(
+                    [key for key in self.opponent_hypotheses],
+                    key=lambda x: self.opponent_hypotheses[x]["value"],
+                    reverse=True,
+                )
                 best_key = sorted_keys[0]
-                # assert the value of the best key is above the threshold
-                assert self.opponent_hypotheses[best_key]['value'] > self.good_hypothesis_thr
+                assert self.opponent_hypotheses[best_key]["value"] > self.good_hypothesis_thr
                 self.possible_opponent_strategy = deepcopy(self.opponent_hypotheses[best_key])
-                good_hypothesis_summary = f"""Good hypothesis found: {self.possible_opponent_strategy}"""
-                # add summary to hls after two new lines
-                hls_response = hls_response + '\n\n' + good_hypothesis_summary
-                hls_user_msg3 = self.generate_interaction_feedback_user_message3(step)
-                hls_user_msg = hls_user_msg + '\n\n' + hls_user_msg3
+                hls_response = hls_response + "\n\n" + f"Good hypothesis found: {self.possible_opponent_strategy}"
+
+                msg3 = self.generate_interaction_feedback_user_message3(step)
                 text = await self.controller.run(
-                self.system_message, hls_user_msg3,
-                temperature=self.temperature,
-                force="next_inventories"  # ★ JSON 強制
-            )
-            response_text = text[0] if isinstance(text, list) else text
-            try:
-                self.next_inventories = _parse_json_like_object(response_text)
-            except Exception as e:
-                print("Error parsing next_inventories JSON:", e)
-                # フェイルセーフ（必要に応じて再試行でもOK）
-                self.next_inventories = {
-                    "my_next_inventory": [0, 0, 0],
-                    "predicted_opponent_next_inventory": [0, 0, 0]
-                }
-            self.opponent_hypotheses[best_key]['next_inventories'] = deepcopy(self.next_inventories)
-            hls_response = hls_response + '\n\n' + response_text
+                    self.system_message, msg3, temperature=self.temperature, force="next_inventories"
+                )
+                response_text3 = text[0] if isinstance(text, list) else text
+                try:
+                    self.next_inventories = _parse_json_like_object(response_text3)
+                except Exception as e:
+                    print("Error parsing next_inventories JSON:", e)
+                    self.next_inventories = {
+                        "my_next_inventory": {
+                            "rock/yellow": 1,
+                            "paper/purple": 1,
+                            "scissors/blue": 1,
+                        },
+                        "predicted_opponent_next_inventory": {
+                            "rock/yellow": 1,
+                            "paper/purple": 1,
+                            "scissors/blue": 1,
+                        },
+                    }
+                self.opponent_hypotheses[best_key]["next_inventories"] = deepcopy(self.next_inventories)
+                hls_response = hls_response + "\n\n" + response_text3
 
-                subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)   
+                subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+                )
         else:
+            # 初回ステップなど
             hls_user_msg = self.generate_hls_user_message(state, step)
-            responses = await asyncio.gather(
-                *[self.controller.async_batch_prompt(self.system_message, [hls_user_msg])]
+            text = await self.controller.run(
+                self.system_message, hls_user_msg, temperature=self.temperature, force="dict"
             )
-            hls_response = responses[0][0] 
-            self.next_inventories = deepcopy(hls_response)
-            subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
+            hls_response = text[0] if isinstance(text, list) else text
 
-            # set which subgoal we are on
-            goal_and_plan['subgoal_num'] = 0
+            # 初回は next_inventories が未確定なのでデフォルトのまま subgoal に入る
+            subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(
+                state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+            )
+            goal_and_plan["subgoal_num"] = 0
 
         return hls_response, subgoal_response, hls_user_msg, subgoal_user_msg
 
-    async def subgoal_module(self, state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=False):
-        user_message = self.generate_feedback_user_message(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
-        responses = await asyncio.gather(
-            *[self.controller.async_batch_prompt(self.system_message, [user_message], force="subgoal")]
+    async def subgoal_module(
+        self, state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=False
+    ):
+        user_message = self.generate_feedback_user_message(
+            state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
         )
-        subgoal_response = responses[0][0]
-        subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
-        #goal_and_plan = self.extract_goals_and_actions(subgoal_response)
-        # check that this is a valid plan
+        # ★ JSON強制（structured_schemas に "subgoal" が無ければ "dict" に変更）
+        text = await self.controller.run(
+            self.system_message, user_message, temperature=self.temperature, force="subgoal"
+        )
+        subgoal_response = text[0] if isinstance(text, list) else text
+
+        # 文字列/配列どちらでもOKに統一
+        subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(
+            subgoal_response, response_type="subgoal", state=state
+        )
+
         valid_plan, plan_response = self.is_valid_plan(state, goal_and_plan)
         counter = 0
         while not valid_plan and counter < 15:
             print(f"Invalid plan for {self.agent_id}, {plan_response}. Trying again.")
-            user_message = self.generate_feedback_user_message(state, plan_response, get_action_from_response_errors, reward_tracker, step)
-            plan_response = plan_response + user_message
-            responses = await asyncio.gather(
-                *[self.controller.async_batch_prompt(self.system_message, [plan_response], force="subgoal")]
+            user_message = self.generate_feedback_user_message(
+                state, plan_response, get_action_from_response_errors, reward_tracker, step
             )
-            subgoal_response = responses[0][0]
-            subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(subgoal_response, response_type='subgoal', state=state)
-            #goal_and_plan = self.extract_goals_and_actions(subgoal_response)
+            text = await self.controller.run(
+                self.system_message, user_message, temperature=self.temperature, force="subgoal"
+            )
+            subgoal_response_retry = text[0] if isinstance(text, list) else text
+            subgoal_response, goal_and_plan = self.parse_multiple_llm_responses(
+                subgoal_response_retry, response_type="subgoal", state=state
+            )
             valid_plan, plan_response = self.is_valid_plan(state, goal_and_plan)
             counter += 1
 
-        if 'action_plan' not in goal_and_plan:
-            print(f"Error: action_plan not found in goal_and_plan.")
+        if "action_plan" not in goal_and_plan:
+            print("Error: action_plan not found in goal_and_plan.")
             breakpoint()
-        # set which subgoal we are on
-        goal_and_plan['subgoal_num'] = 0 
 
-        # breakpoint if subgoal_response is a list and not a str
+        goal_and_plan["subgoal_num"] = 0
+
         if isinstance(subgoal_response, list):
             breakpoint()
 
         return user_message, subgoal_response, goal_and_plan
 
     def eval_hypotheses(self):
-        latest_key = max(self.opponent_hypotheses.keys()) # should this be evaluated when hypothesis is good?
-        # Sort the keys of self.opponent_hypotheses based on 'value', in descending order
-        sorted_keys = sorted([key for key in self.opponent_hypotheses if key != latest_key],
-                    key=lambda x: self.opponent_hypotheses[x]['value'], 
-                    reverse=True)
-        keys2eval = sorted_keys[:self.top_k] + [latest_key]
-        # Loop through the top N keys and the latest key
+        latest_key = max(self.opponent_hypotheses.keys())
+        sorted_keys = sorted(
+            [key for key in self.opponent_hypotheses if key != latest_key],
+            key=lambda x: self.opponent_hypotheses[x]["value"],
+            reverse=True,
+        )
+        keys2eval = sorted_keys[: self.top_k] + [latest_key]
         self.good_hypothesis_found = False
         for key in keys2eval:
-            # Access and use the key and its corresponding 'value'
-            if 'predicted_opponent_next_inventory' not in self.opponent_hypotheses[key]['next_inventories']:
+            if "predicted_opponent_next_inventory" not in self.opponent_hypotheses[key]["next_inventories"]:
                 breakpoint()
-            predicted_opponent_next_inventory = self.opponent_hypotheses[key]['next_inventories']['predicted_opponent_next_inventory']
-            empirical_opp_inventory = self.interaction_history[-1]['possible_opponent_inventory']
+            predicted_opponent_next_inventory = self.opponent_hypotheses[key]["next_inventories"][
+                "predicted_opponent_next_inventory"
+            ]
+            empirical_opp_inventory = self.interaction_history[-1]["possible_opponent_inventory"]
 
-            # Find the key with max value in each inventory
-            # first check for ties in each inventory
             both_inventories = [predicted_opponent_next_inventory, empirical_opp_inventory]
+            is_tie = False
             for inventory in both_inventories:
                 max_value = max(inventory.values())
                 max_items = [item for item, value in inventory.items() if value == max_value]
                 is_tie = len(max_items) > 1
                 if is_tie:
                     break
-
             if is_tie:
-                # do not update value either way with ambiguous data
                 continue
 
-            # Find the key with max value in each inventory
             max_pred_key = max(predicted_opponent_next_inventory, key=predicted_opponent_next_inventory.get)
             max_empirical_key = max(empirical_opp_inventory, key=empirical_opp_inventory.get)
-            # Check if the max item is the same in both inventories
             same_max_item = max_pred_key == max_empirical_key
             if same_max_item:
-                # update the value of this hypothesis with a Rescorla Wagner update
-                prediction_error = self.correct_guess_reward - self.opponent_hypotheses[key]['value']
-                #self.opponent_hypotheses[key]['value'] = self.opponent_hypotheses[key]['value'] + self.alpha * self.correct_guess_reward
+                prediction_error = self.correct_guess_reward - self.opponent_hypotheses[key]["value"]
             else:
-                prediction_error = -self.correct_guess_reward - self.opponent_hypotheses[key]['value']
-                #self.opponent_hypotheses[key]['value'] = self.opponent_hypotheses[key]['value'] - self.alpha * self.correct_guess_reward
-            self.opponent_hypotheses[key]['value'] = self.opponent_hypotheses[key]['value'] + (self.alpha * prediction_error)
+                prediction_error = -self.correct_guess_reward - self.opponent_hypotheses[key]["value"]
+            self.opponent_hypotheses[key]["value"] = self.opponent_hypotheses[key]["value"] + (
+                self.alpha * prediction_error
+            )
 
-            if self.opponent_hypotheses[key]['value'] > self.good_hypothesis_thr:
+            if self.opponent_hypotheses[key]["value"] > self.good_hypothesis_thr:
                 self.good_hypothesis_found = True
-        
-    def parse_multiple_llm_responses(self, responses, response_type=None, state=None):
-        """Parses the critic's response and returns the feedback."""
-        if response_type == 'subgoal':
-            for i, response in enumerate(responses):
-                response_dict = self.extract_dict(response)
-                if response_dict == {}:
-                    continue
-                elif not self.is_valid_plan(state, response_dict):
-                    continue
-                else:
-                    goals_and_actions = response_dict
-                    subgoal_response = response
-                    return subgoal_response, goals_and_actions
-                
-            return '', {}
-        elif response_type == 'next_inventories':
-            for i, response in enumerate(responses):
-                response_dict = self.extract_dict(response)
-                if response_dict == {}:
-                    continue
-                elif 'predicted_opponent_next_inventory' not in response_dict:
-                    continue
-                elif 'my_next_inventory' not in response_dict:
-                    continue
-                else:
-                    return response, response_dict
-        else:
-            for i, response in enumerate(responses):
-                response_dict = self.extract_dict(response)
-                if response_dict == {}:
-                    continue
-                else:
-                    return response, response_dict
-                
-            return '', {}
 
+    def parse_multiple_llm_responses(self, responses, response_type=None, state=None):
+        """responses は str でも List[str] でもOK。パース成功した最初のものを採用。"""
+        items = responses if isinstance(responses, (list, tuple)) else [responses]
+
+        if response_type == "subgoal":
+            for response in items:
+                response_dict = self.extract_dict(response)
+                if response_dict == {}:
+                    continue
+                elif not self.is_valid_plan(state, response_dict)[0]:
+                    continue
+                else:
+                    return response, response_dict
+            return "", {}
+
+        elif response_type == "next_inventories":
+            for response in items:
+                response_dict = self.extract_dict(response)
+                if response_dict == {}:
+                    continue
+                if (
+                    "predicted_opponent_next_inventory" in response_dict
+                    and "my_next_inventory" in response_dict
+                ):
+                    return response, response_dict
+            return "", {}
+
+        else:
+            for response in items:
+                response_dict = self.extract_dict(response)
+                if response_dict != {}:
+                    return response, response_dict
+            return "", {}
 
     def extract_dict(self, response: str):
         try:
             s = (response or "").strip()
-
-            # 余計な思考断片を除去（あれば）
             s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL).strip()
-
-            # コードフェンス除去（```json / ```python / ```）
             if s.startswith("```"):
                 m = re.match(r"^```[a-zA-Z]*\n(.*?)\n```", s, flags=re.DOTALL)
                 if m:
                     s = m.group(1).strip()
-
-            # 1) まず JSON として試す（素の JSON / ```json``` の両対応）
             try:
                 obj = json.loads(s)
                 if isinstance(obj, dict):
                     return obj
             except Exception:
                 pass
-
-            # 2) 本文にゴミが混じる場合に備えて {} の最外殻を抽出して再挑戦
             i, j = s.find("{"), s.rfind("}")
             if 0 <= i < j:
-                cand = s[i:j+1]
+                cand = s[i : j + 1]
                 for parser in (json.loads, ast.literal_eval):
                     try:
                         obj = parser(cand)
@@ -727,347 +719,226 @@ class DecentralizedAgent(abc.ABC):
                             return obj
                     except Exception:
                         continue
-
-            # 3) 最後の手段：全体を Python リテラルとして解釈
             obj = ast.literal_eval(s)
             if isinstance(obj, dict):
                 return obj
-
         except Exception as e:
             print(f"Error parsing dictionary (robust): {e}")
-
-        # 失敗時は空 dict
         return {}
 
     def extract_goals_and_actions(self, response):
         goals_and_actions = self.extract_dict(response)
         return goals_and_actions
 
-    def get_actions_from_plan(
-            self, 
-            goals_and_actions: Dict[str, Any],
-            grid: np.ndarray,
-            state: Dict[str, Any]) -> Optional[str]:
-        """Given a plan, return a list of actions to be performed by the agent."""
+    def get_actions_from_plan(self, goals_and_actions: Dict[str, Any], grid: np.ndarray, state: Dict[str, Any]) -> Optional[str]:
         try:
-            #self.goal = goals_and_actions['goal']
-            self.action_plan = goals_and_actions['action_plan']
-            self.subgoal_num = goals_and_actions['subgoal_num']
+            self.action_plan = goals_and_actions["action_plan"]
+            self.subgoal_num = goals_and_actions["subgoal_num"]
         except Exception as e:
-            return f"Error parsing goals and actions: {e}" 
-        #for action_plan in self.action_plans:
-        # get actions for current subgoal
+            return f"Error parsing goals and actions: {e}"
         action_plan = self.action_plan[self.subgoal_num]
-        split_idx = action_plan.find('(')
+        split_idx = action_plan.find("(")
         func_name = action_plan[:split_idx]
-        # if error, return the error message to be appended to the prompt
         try:
-            func_args = ast.literal_eval(action_plan[split_idx+1:-1])
+            func_args = ast.literal_eval(action_plan[split_idx + 1 : -1])
         except Exception as e:
-            return f"Error parsing function arguments: {e}"            
-        func = getattr(action_funcs, func_name)            
-        if func_name == 'move_to':                
-            start, goal = func_args                  
+            return f"Error parsing function arguments: {e}"
+        func = getattr(action_funcs, func_name)
+        if func_name == "move_to":
+            start, goal = func_args
             paths, actions, current_orient, path_found = func(start, goal, grid, self.orientation)
             if not path_found:
                 print(f"No path found for action plan: {action_plan}. Making less strict action sequence")
-                self.combine_all_known_states(state) # update agent.all_known_states
+                self.combine_all_known_states(state)
                 goal_type = None
                 for key, coordinates in self.all_known_states.items():
                     if goal in coordinates:
                         goal_type = key
-                opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
-                labels = ['wall', 'yellow_box', 'blue_box', 'purple_box', opponent_key]
-                # remove goal_type from obstacles, ie can collect resources of same type
+                opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
+                labels = ["wall", "yellow_box", "blue_box", "purple_box", opponent_key]
                 if goal_type in labels:
                     labels.remove(goal_type)
                 new_grid = self.build_grid_from_states(self.all_known_states, labels, [goal])
                 paths, actions, current_orient, path_found = func(start, goal, new_grid, self.orientation)
             if not path_found:
                 print(f"Still no path found for action plan: {action_plan}. Making even less strict action sequence")
-                # only include walls as obstacles
-                labels = ['wall']
+                labels = ["wall"]
                 new_grid = self.build_grid_from_states(self.all_known_states, labels, [goal])
                 paths, actions, current_orient, path_found = func(start, goal, new_grid, self.orientation)
-
-            # update agent's position (if moved) and orientation
             if len(paths) > 0:
                 self.pos = paths[-1]
             self.orientation = deepcopy(current_orient)
             self.destination = deepcopy(goal)
-        elif func_name == 'fire_at':
-            actions = ['INTERACT_'+str(func_args)]
-            # target = func_args
-            # actions, current_orient = func(self.pos, self.orientation, target)
-            # self.orientation = current_orient
-
-        for action in actions:                      
+        elif func_name == "fire_at":
+            actions = ["INTERACT_" + str(func_args)]
+        for action in actions:
             self.all_actions.put(action)
 
     def build_grid_from_states(self, states: Dict[str, List[Tuple[int, int]]], labels: List[str], ignore: List[Tuple[int, int]] = None) -> np.ndarray:
-        """Build a grid from a dictionary of states. Setting walls and other obstacles you pass in (as str in labels) to 1, 
-        and all other things as 0."""
         grid_width = 23
         grid_height = 15
         grid = np.zeros((grid_width, grid_height))
         for label, coords in states.items():
-            if label == 'inventory':
+            if label == "inventory":
                 continue
             for x, y in coords:
                 if any(label == l or label.startswith(l) for l in labels):
                     grid[x, y] = 1
                 else:
                     grid[x, y] = 0
-
-        # Looping through coordinates to ignore (ie. waypoints on plan) and setting the corresponding grid values to 0.0
         if ignore is None:
             ignore = []
-            
         for row, col in ignore:
             grid[row, col] = 0.0
         return grid
 
     def is_valid_plan(self, state, goals_and_actions):
-        """
-        Check if the action plans contain any moves that lead to a wall.
-
-        :return: Boolean indicating whether the plans are valid or not.
-        """
-        if 'action_plan' not in goals_and_actions or len(goals_and_actions['action_plan']) == 0:
+        if "action_plan" not in goals_and_actions or len(goals_and_actions["action_plan"]) == 0:
             response = f"Error: No action plan found in response: {goals_and_actions}. Replan and try again."
             return False, response
-            
-        wall_locations = state['global']['wall']
-        for plan in goals_and_actions['action_plan']:
-            # Extract the destination location from the action plan
+        wall_locations = state["global"]["wall"]
+        for plan in goals_and_actions["action_plan"]:
             try:
-                destination = tuple(map(int, plan.split('(')[-1].strip(')').split(', ')))
+                destination = tuple(map(int, plan.split("(")[-1].strip(")").split(", ")))
             except ValueError:
                 response = f"Invalid destination location in action plan: {plan}. Replan and try again."
                 return False, response
-            
-            # Check if the destination is a wall location
             if destination in wall_locations:
-                response = f"Invalid plan as it leads to a wall: {destination}. Replan and try again. DO NOT INCLUDE MOVE_TO ACTIONS THAT LEAD TO WALLS. \
-                Think step by step about whether target locations are valid. "
-                return False, response  # Invalid plan as it leads to a wall
-
+                response = (
+                    f"Invalid plan as it leads to a wall: {destination}. Replan and try again. "
+                    f"DO NOT INCLUDE MOVE_TO ACTIONS THAT LEAD TO WALLS. Think step by step about whether target locations are valid."
+                )
+                return False, response
         response = None
-        return True, response  # All plans are valid
+        return True, response
 
     def act(self) -> Optional[str]:
-        """Return the next action to be performed by the agent. 
-        If no action is available, return None.
-        """
-        if not self.all_actions.empty():        
+        if not self.all_actions.empty():
             return self.all_actions.get()
 
     def update_state(self, state: Dict[str, Any]) -> Optional[str]:
-        """Update the position of the agent."""
         try:
-            agent_key = [item for item in state['global'].keys() if item.startswith(self.agent_id)][0]        
-            self.pos = state['global'][agent_key][0]    # (x, y) -> (col, row)                    
-            self.orientation = agent_key.split('-')[1]            
-            if hasattr(self, 'goal'):                                
-                # checking if agent is at it's goal location
+            agent_key = [item for item in state["global"].keys() if item.startswith(self.agent_id)][0]
+            self.pos = state["global"][agent_key][0]
+            self.orientation = agent_key.split("-")[1]
+            if hasattr(self, "goal"):
                 for action_plan in self.action_plan:
-                    if 'move_to' in action_plan:
-                        split_idx = action_plan.find('(')
-                        func_args = ast.literal_eval(action_plan[split_idx+1:-1])
-                        goal_pos = func_args[1]                                
+                    if "move_to" in action_plan:
+                        split_idx = action_plan.find("(")
+                        func_args = ast.literal_eval(action_plan[split_idx + 1 : -1])
+                        goal_pos = func_args[1]
                         output = f"Reached goal position {goal_pos}: {self.pos == goal_pos}"
                         return output
         except IndexError:
             print(f"Agent {self.agent_id} error...")
-            if hasattr(self, 'goal'):                                
-                # checking if agent is at it's goal location
+            if hasattr(self, "goal"):
                 for action_plan in self.action_plan:
-                    if 'move_to' in action_plan:
-                        split_idx = action_plan.find('(')
-                        func_args = ast.literal_eval(action_plan[split_idx+1:-1])
-                        goal_pos = func_args[1]                                
+                    if "move_to" in action_plan:
+                        split_idx = action_plan.find("(")
+                        func_args = ast.literal_eval(action_plan[split_idx + 1 : -1])
+                        goal_pos = func_args[1]
                         output = f"Out of game now due to hit by laser in the last 5 steps."
                         return output
 
-    # def update_memory(self, state, step):
-    #     """
-    #     Update the memory states with the latest observations.
-
-    #     :param state: Dictionary of the current state.
-    #     :param step: The current step number in the game.
-    #     """
-    #     ego_state = state[self.agent_id]
-    #     player_key = self.agent_id
-    #     opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
-    #     for entity_type in ['yellow_box', 'blue_box', 'purple_box', 'ground', player_key, opponent_key]:
-    #         if entity_type[:6] == 'player':
-    #             observed_locations = [v[0] for k, v in ego_state.items() if k.startswith(entity_type)]
-    #         else:
-    #             observed_locations = ego_state.get(entity_type, [])
-    #         for location in observed_locations:
-    #             # Remove this location from all other entity types
-    #             for other_entity in self.memory_states:
-    #                 if other_entity != entity_type:
-    #                     self.memory_states[other_entity] = [
-    #                         (loc, step_str, distance) for loc, step_str, distance in self.memory_states[other_entity] if loc != location
-    #                     ]
-
-    #             # Update or add the location with the latest step number and remove older references of the same location
-    #             self.memory_states[entity_type] = [
-    #                 (loc, step, distance) for loc, step, distance in self.memory_states[entity_type] if loc != location
-    #             ]
-    #             self.memory_states[entity_type].append((location, 'Step: '+str(step), 'distance: unknown'))
-
     def update_memory(self, state, step):
-        """
-        Update the memory states with the latest observations.
-
-        :param state: Dictionary of the current state.
-        :param step: The current step number in the game.
-        """
         ego_state = state[self.agent_id]
         player_key = self.agent_id
-        opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
-        for entity_type in ['yellow_box', 'blue_box', 'purple_box', 'ground', player_key, opponent_key]:
-            if entity_type[:6] == 'player':
+        opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
+        for entity_type in ["yellow_box", "blue_box", "purple_box", "ground", player_key, opponent_key]:
+            if entity_type[:6] == "player":
                 observed_locations = [v[0] for k, v in ego_state.items() if k.startswith(entity_type)]
             else:
                 observed_locations = ego_state.get(entity_type, [])
             for location in observed_locations:
-                # Remove this location from all other entity types
                 for other_entity in self.memory_states:
                     if other_entity != entity_type:
-                        self.memory_states[other_entity] = [
-                            (loc) for loc in self.memory_states[other_entity] if loc != location
-                        ]
-
-                # Update or add the location with the latest step number and remove older references of the same location
-                self.memory_states[entity_type] = [
-                    loc for loc in self.memory_states[entity_type] if loc != location
-                ]
+                        self.memory_states[other_entity] = [loc for loc in self.memory_states[other_entity] if loc != location]
+                self.memory_states[entity_type] = [loc for loc in self.memory_states[entity_type] if loc != location]
                 self.memory_states[entity_type].append(location)
 
     def interact(self, state, location):
-        """
-        Interact with the target player.
-
-        :param state: Dictionary of the current state.
-        :param location: The location to stay around.
-        :return: The action to be performed by the agent.
-        """
         ego_state = state[self.agent_id]
-        opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
+        opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
         opponent_locations = [v[0] for k, v in ego_state.items() if k.startswith(opponent_key)]
         if len(opponent_locations) > 0:
             target = opponent_locations[0]
-            fire_at = getattr(action_funcs, 'fire_at') 
+            fire_at = getattr(action_funcs, "fire_at")
             actions, current_orient = fire_at(self.pos, self.orientation, target)
-            for action in actions:                      
+            for action in actions:
                 self.all_actions.put(action)
         else:
-            # spin clockwise until other agent is found
-            self.all_actions.put('TURN_RIGHT')
+            self.all_actions.put("TURN_RIGHT")
 
     def check_next_state_type(self, state, action):
-        # used to determine move outcome based on orientation
         action_outcome_dict = {
-            'N': {'FORWARD': (0, -1), 'STEP_LEFT': (-1, 0), 'STEP_RIGHT': (1, 0), 'BACKWARD': (0, 1),
-                'TURN_LEFT': 'W', 'TURN_RIGHT': 'E', 'FIRE_ZAP': 'N'},
-            'E': {'FORWARD': (1, 0), 'STEP_LEFT': (0, -1), 'STEP_RIGHT': (0, 1), 'BACKWARD': (-1, 0),
-                'TURN_LEFT': 'N', 'TURN_RIGHT': 'S', 'FIRE_ZAP': 'E'},
-            'S': {'FORWARD': (0, 1), 'STEP_LEFT': (1, 0), 'STEP_RIGHT': (-1, 0), 'BACKWARD': (0, -1),
-                'TURN_LEFT': 'E', 'TURN_RIGHT': 'W', 'FIRE_ZAP': 'S'},
-            'W': {'FORWARD': (-1, 0), 'STEP_LEFT': (0, 1), 'STEP_RIGHT': (0, -1), 'BACKWARD': (1, 0),
-                'TURN_LEFT': 'S', 'TURN_RIGHT': 'N', 'FIRE_ZAP': 'W'},
-            } 
-        # Extracting the current position and orientation of the player
+            "N": {"FORWARD": (0, -1), "STEP_LEFT": (-1, 0), "STEP_RIGHT": (1, 0), "BACKWARD": (0, 1), "TURN_LEFT": "W", "TURN_RIGHT": "E", "FIRE_ZAP": "N"},
+            "E": {"FORWARD": (1, 0), "STEP_LEFT": (0, -1), "STEP_RIGHT": (0, 1), "BACKWARD": (-1, 0), "TURN_LEFT": "N", "TURN_RIGHT": "S", "FIRE_ZAP": "E"},
+            "S": {"FORWARD": (0, 1), "STEP_LEFT": (1, 0), "STEP_RIGHT": (-1, 0), "BACKWARD": (0, -1), "TURN_LEFT": "E", "TURN_RIGHT": "W", "FIRE_ZAP": "S"},
+            "W": {"FORWARD": (-1, 0), "STEP_LEFT": (0, 1), "STEP_RIGHT": (0, -1), "BACKWARD": (1, 0), "TURN_LEFT": "S", "TURN_RIGHT": "N", "FIRE_ZAP": "W"},
+        }
         ego_state = state[self.agent_id]
         for key, value in ego_state.items():
             if self.agent_id in key:
                 self.current_pos = value[0]
-                self.current_orient = key.split('-')[-1]
+                self.current_orient = key.split("-")[-1]
                 break
         else:
-            # Return if player position or orientation is not found
             return "Player position or orientation not found", None
-
-        # Determining the movement based on the action and orientation
         movement = action_outcome_dict[self.current_orient][action]
         if not isinstance(movement, tuple):
-            # movement = (0,0) if movement is not a tuple (i.e., it's a turn action)
-            movement = (0,0)
-
-        # Calculating the new position
+            movement = (0, 0)
         new_pos = (self.current_pos[0] + movement[0], self.current_pos[1] + movement[1])
-
-        # Determining the type of square at the new position
         for square_type, positions in ego_state.items():
             if new_pos in positions:
                 return square_type, new_pos
-
-        # If new position does not match any known square type
         return "Unknown square type", new_pos
 
     def check_plan_one_step(self, action, state, env, agent_goals_and_actions):
-        # use one step lookahead to see if action takes us to valid/intended location
         next_state_type, new_pos = self.check_next_state_type(state, action)
         goal_and_plan = agent_goals_and_actions[self.agent_id]
-        subgoal = goal_and_plan['action_plan'][goal_and_plan['subgoal_num']]
-        if next_state_type != 'ground' and new_pos != self.destination and action != 'FIRE_ZAP' and action[:8] != 'INTERACT' and subgoal[:7] != 'fire_at':
-            # if next state is not ground, ie. collects unintended resource, replan with newly observed state information
-            # update current subgoal with current position
-            subgoal = goal_and_plan['action_plan'][goal_and_plan['subgoal_num']]
-            # Splitting the subgoal into two parts at the first closing parenthesis
-            part1, part2 = subgoal.split('),', 1)
-            # Updating the first part with the agent's current position
-            updated_part1 = part1[:part1.find('(') + 1] + str(self.current_pos)
-            # Reassembling the updated subgoal
-            subgoal = updated_part1 + ',' + part2
-            goal_and_plan['action_plan'][goal_and_plan['subgoal_num']] = subgoal
+        subgoal = goal_and_plan["action_plan"][goal_and_plan["subgoal_num"]]
+        if (
+            next_state_type != "ground"
+            and new_pos != self.destination
+            and action != "FIRE_ZAP"
+            and action[:8] != "INTERACT"
+            and subgoal[:7] != "fire_at"
+        ):
+            subgoal = goal_and_plan["action_plan"][goal_and_plan["subgoal_num"]]
+            part1, part2 = subgoal.split("),", 1)
+            updated_part1 = part1[: part1.find("(") + 1] + str(self.current_pos)
+            subgoal = updated_part1 + "," + part2
+            goal_and_plan["action_plan"][goal_and_plan["subgoal_num"]] = subgoal
             agent_goals_and_actions[self.agent_id] = goal_and_plan
-            # make pathfinding grid include all resources excluding ones on the plan
-            # Extracting coordinates from the action plans to exclude from grid
             waypoints = set()
-            tuples = re.findall(r'\((\d+,\s*\d+)\)', subgoal)
+            tuples = re.findall(r"\((\d+,\s*\d+)\)", subgoal)
             for tup in tuples:
-                waypoints.add(tuple(map(int, tup.split(','))))
+                waypoints.add(tuple(map(int, tup.split(","))))
             waypoints = list(waypoints)
-            # combine all known states
-            self.combine_all_known_states(state) # update agent.all_known_states
-            opponent_key = ['player_1' if self.agent_id == 'player_0' else 'player_0'][0]
-            labels = ['wall', 'yellow_box', 'blue_box', 'purple_box', opponent_key]
+            self.combine_all_known_states(state)
+            opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
+            labels = ["wall", "yellow_box", "blue_box", "purple_box", opponent_key]
             plan_grid = env.build_grid_from_states(self.all_known_states, labels, waypoints)
-            # empty actions queue and get new actions with new pos and new information
             while not self.all_actions.empty():
                 self.all_actions.get()
             self.get_actions_from_plan(goal_and_plan, plan_grid, state)
             action = self.act()
-
         if action is None:
             print(f"Agent {self.agent_id} is None, choosing NOOP.")
-            action = 'NOOP'
-
+            action = "NOOP"
         return action, agent_goals_and_actions
 
     def combine_all_known_states(self, state):
         ego_state = state[self.agent_id]
         self.all_known_states = {}
-
-        # wall locations are always known
-        self.all_known_states['wall'] = set(state['global']['wall'])
-
-        # Add information from ego_state
+        self.all_known_states["wall"] = set(state["global"]["wall"])
         for key, coords in ego_state.items():
-            if key != 'inventory' and key != 'wall':  # Exclude non-spatial data if needed
+            if key != "inventory" and key != "wall":
                 self.all_known_states[key] = set(coords)
-
-        # Add information from agent.memory_states
         for key, coords in self.memory_states.items():
             if key not in self.all_known_states:
                 self.all_known_states[key] = set()
             for coord in coords:
                 self.all_known_states[key].add(coord)
-
-        # Convert sets back to lists
         for key in self.all_known_states:
             self.all_known_states[key] = list(self.all_known_states[key])
