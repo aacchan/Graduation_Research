@@ -395,17 +395,45 @@ class DecentralizedAgent(abc.ABC):
             counter = 0
             while not correct_syntax and counter < 15:
                 correct_syntax = True
-                responses = await asyncio.gather(
-                    *[self.controller.async_batch_prompt(self.system_message, [hls_user_msg1])]
-                )
-                response = responses[0][0] 
-                #possible_opponent_inventory = self.extract_dict(response)
-                response, possible_opponent_inventory = self.parse_multiple_llm_responses(response)
-                key_present = 'possible_opponent_inventory' in possible_opponent_inventory
-                if not key_present:
-                    correct_syntax = False
-                    print(f"Error parsing dictionary when extracting opponent inventory, retrying...")
+                # ★ guided JSON を強制して並列実行（async_batch_promptは使わず run を直呼び）
+                coros = [
+                    self.controller.run(
+                        self.system_message, user_msg,
+                        temperature=self.temperature,
+                        force="next_inventories"  # ★ lm-format-enforcer で JSON を強制
+                    )
+                    for user_msg in user_messages
+                ]
+                results = await asyncio.gather(*coros)
+
+                for i, text in enumerate(results):
+                    # run() は n>1 だと list になる場合があるので先頭を使う
+                    response_text = text[0] if isinstance(text, list) else text
+                    try:
+                        next_inventories = _parse_json_like_object(response_text)
+                    except Exception as e:
+                        correct_syntax = False
+                        print(f"Error parsing next_inventories JSON: {e}")
+                        break
+            
+                    both_keys_present = (
+                        ('my_next_inventory' in next_inventories) and
+                        ('predicted_opponent_next_inventory' in next_inventories)
+                    )
+                    if not both_keys_present:
+                        correct_syntax = False
+                        print("Error parsing dictionary when extracting next inventories, retrying...")
+                        break
+            
+                    if i == 0:
+                        self.next_inventories = deepcopy(next_inventories)
+                        self.opponent_hypotheses[self.interaction_num]['next_inventories'] = deepcopy(self.next_inventories)
+                        # add response to hls after two new lines
+                        hls_response = hls_response + '\n\n' + response_text
+                    else:
+                        self.opponent_hypotheses[sorted_keys[i-1]]['next_inventories'] = deepcopy(next_inventories)
                 counter += 1
+                
             self.possible_opponent_inventory = deepcopy(possible_opponent_inventory)
             # add response to hls after two new lines
             hls_response = hls_response + '\n\n' + response
@@ -491,15 +519,24 @@ class DecentralizedAgent(abc.ABC):
                 hls_response = hls_response + '\n\n' + good_hypothesis_summary
                 hls_user_msg3 = self.generate_interaction_feedback_user_message3(step)
                 hls_user_msg = hls_user_msg + '\n\n' + hls_user_msg3
-                responses = await asyncio.gather(
-                    *[self.controller.async_batch_prompt(self.system_message, [hls_user_msg3])]
-                )
-                response = responses[0][0]
-                #self.next_inventories = self.extract_dict(response)
-                response, self.next_inventories = self.parse_multiple_llm_responses(response, response_type='next_inventories')
-                self.opponent_hypotheses[best_key]['next_inventories'] = deepcopy(self.next_inventories)
-                # add response to hls after two new lines
-                hls_response = hls_response + '\n\n' + response
+                text = await self.controller.run(
+                self.system_message, hls_user_msg3,
+                temperature=self.temperature,
+                force="next_inventories"  # ★ JSON 強制
+            )
+            response_text = text[0] if isinstance(text, list) else text
+            try:
+                self.next_inventories = _parse_json_like_object(response_text)
+            except Exception as e:
+                print("Error parsing next_inventories JSON:", e)
+                # フェイルセーフ（必要に応じて再試行でもOK）
+                self.next_inventories = {
+                    "my_next_inventory": [0, 0, 0],
+                    "predicted_opponent_next_inventory": [0, 0, 0]
+                }
+            self.opponent_hypotheses[best_key]['next_inventories'] = deepcopy(self.next_inventories)
+            hls_response = hls_response + '\n\n' + response_text
+
                 subgoal_user_msg, subgoal_response, goal_and_plan = await self.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)   
         else:
             hls_user_msg = self.generate_hls_user_message(state, step)
