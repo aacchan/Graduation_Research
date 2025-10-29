@@ -10,6 +10,27 @@ from typing import List, Dict, Any, Tuple, Optional
 
 from llm_plan.agent import action_funcs
 
+def _parse_json_like_object(text: str) -> dict:
+    """JSON優先＋フォールバックで dict を取り出す。前後の説明やコードフェンスに耐性あり。"""
+    # コードフェンス除去
+    text = re.sub(r"```(?:json|python)?\s*|```", "", str(text), flags=re.I).strip()
+    # 最初の { ... } を抽出
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if not m:
+        raise ValueError("No JSON object braces found in LLM output.")
+    blob = m.group(0).strip()
+    # JSON を優先
+    try:
+        return json.loads(blob)
+    except Exception:
+        pass
+    # Python リテラル
+    try:
+        return ast.literal_eval(blob)
+    except Exception:
+        pass
+    # よくある ' と " の混在を軽く補正して再挑戦
+    return json.loads(re.sub(r"'", '"', blob))
 
 class DecentralizedAgent(abc.ABC):
     def __init__(
