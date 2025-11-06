@@ -40,7 +40,7 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
     elif llm_type == 'llama3':
         kwargs = {
             'api_key': "EMPTY",
-            'base_url': "http://localhost",
+            'base_url': "http://127.0.0.1",
             'port': 8000,
             'version': 'v1',
             'model': 'meta-llama/Meta-Llama-3-8B-Instruct'
