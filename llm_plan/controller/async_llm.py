@@ -79,6 +79,6 @@ class AsyncChatLLM:
 
         return await self.client.chat.completions.create(
             messages=messages,
-            extra_body=extra_body if extra_body else None,
+            extra_body=extra_body,  # 空でも {} を渡す
             **{**self.default_kwargs, **kwargs, "model": kwargs.get("model", self.model)}
         )
