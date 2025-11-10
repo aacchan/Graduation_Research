@@ -122,7 +122,7 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
             "max_tokens": 2000,
             "temperature": 0.2,
             "top_p": 1.0,
-            "n": 10,
+            "n": 1,
         }
     elif llm_type == 'llama2':
         model_settings = {
