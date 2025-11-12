@@ -77,6 +77,17 @@ class AsyncChatLLM:
                 "guided_decoding_backend": guided_backend,
             })
 
+        # --- デバッグ出力ここから ---
+        print("\n================== LLM CALL DEBUG ==================")
+        print("Model:", self.model)
+        print("Base URL:", getattr(self.client, 'base_url', 'unknown'))
+        print("Messages:")
+        for m in messages:
+            print("  ", m)
+        print("Extra body (for guided decoding):", json.dumps(extra_body, indent=2, ensure_ascii=False))
+        print("====================================================\n")
+        # --- ここまで ---
+
         return await self.client.chat.completions.create(
             messages=messages,
             extra_body=extra_body,  # 空でも {} を渡す
