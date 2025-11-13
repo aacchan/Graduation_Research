@@ -1,3 +1,4 @@
+import json
 from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
@@ -77,17 +78,29 @@ class AsyncChatLLM:
                 "guided_decoding_backend": guided_backend,
             })
 
-        # --- デバッグ出力ここから ---
+        # --- デバッグ出力ここから（__call__ の API呼び出し直前） ---
         print("\n================== LLM CALL DEBUG ==================")
         print("Model:", self.model)
-        print("Base URL:", getattr(self.client, 'base_url', 'unknown'))
+        print("Base URL:", getattr(self.client, "base_url", "unknown"))
+
+        # メッセージは長すぎてターミナルが埋まることがあるので頭だけ表示
         print("Messages:")
         for m in messages:
-            print("  ", m)
-        print("Extra body (for guided decoding):", json.dumps(extra_body, indent=2, ensure_ascii=False))
+            role = m.get("role")
+            content = (m.get("content") or "")
+            preview = content[:500] + ("..." if len(content) > 500 else "")
+            print("  ", {"role": role, "content": preview})
+
+        # extra_body は JSON化できない型が紛れることがあるので try/except
+        try:
+            print("Extra body (for guided decoding):", json.dumps(extra_body, indent=2, ensure_ascii=False)[:4000])
+        except Exception as e:
+            print("Extra body (raw):", str(extra_body)[:4000], "  <-- json.dumps失敗:", repr(e))
+
         print("====================================================\n")
         # --- ここまで ---
 
+                           
         return await self.client.chat.completions.create(
             messages=messages,
             extra_body=extra_body,  # 空でも {} を渡す
