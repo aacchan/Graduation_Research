@@ -73,10 +73,11 @@ class AsyncChatLLM:
         # Inject guided decoding only when schema provided
         extra_body: Dict[str, Any] = dict(kwargs.pop("extra_body", {}) or {})
         if structured_schema is not None:
-            extra_body.update({
-                "guided_json": structured_schema,
-                "guided_decoding_backend": guided_backend,
-            })
+            # vLLM guided decoding
+            extra_body["guided_json"] = structured_schema
+            # 既定は lm-format-enforcer。サーバ側の設定に合わせて変えたければ引数で上書き
+            extra_body["guided_decoding_backend"] = guided_backend
+
 
         # --- デバッグ出力ここから（__call__ の API呼び出し直前） ---
         print("\n================== LLM CALL DEBUG ==================")
