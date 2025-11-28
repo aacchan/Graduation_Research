@@ -1,6 +1,7 @@
-
-FFMPEG="/home/student/e22/e225764/work/Hypothetical-Minds/hm/lib/python3.10/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
 #!/bin/bash
+
+# Set your ffmpeg binary
+FFMPEG="/home/student/e22/e225764/work/Hypothetical-Minds/hm/bin/ffmpeg"
 
 # Check if target folder is provided
 if [ "$#" -ne 1 ]; then
@@ -12,9 +13,10 @@ TARGET_FOLDER="$1"
 
 # Check if ffmpeg is installed
 if ! command -v "$FFMPEG" &> /dev/null; then
-    echo "ffmpeg could not be found. Please install it to continue."
+    echo "ffmpeg could not be found at: $FFMPEG"
     exit 1
 fi
+
 
 # Get absolute path of the target folder
 ABS_TARGET_FOLDER="$(realpath "$TARGET_FOLDER")"
