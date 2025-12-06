@@ -77,7 +77,7 @@ class AsyncChatLLM:
                 "guided_json": structured_schema,
                 "guided_decoding_backend": guided_backend,
             })
-
+        """
         # --- デバッグ出力ここから（__call__ の API呼び出し直前） ---
         print("\n================== LLM CALL DEBUG ==================")
         print("Model:", self.model)
@@ -99,7 +99,7 @@ class AsyncChatLLM:
 
         print("====================================================\n")
         # --- ここまで ---
-
+        """
                            
         return await self.client.chat.completions.create(
             messages=messages,
