@@ -111,12 +111,15 @@ async def run_episode(env, agent):
     after_interaction = False
     inventory_per_step = []
 
-    #step時間測定
+    # step時間測定
     step_metrics = []         # 各ステップの計測結果を格納するリスト
     last_total_cost = total_cost  # ステップごとのコスト増分を出すための基準
 
+    # ★追加: 1000 step 到達時点の経過時間（秒）
+    time_at_1000_steps = None
+
     while not done:
-        #ステップの計測開始
+        # ステップの計測開始
         step_start = time.perf_counter()
 
         step += 1
@@ -322,7 +325,7 @@ async def run_episode(env, agent):
             execution_outcomes = {}
             execution_outcomes[agent.agent_id] =  agent.update_state(state)
 
-        #ステップ計測の終了・記録
+        # ステップ計測の終了・記録
         step_duration = time.perf_counter() - step_start
         # 直近ステップのコスト増分（合計→差分）
         step_total_cost = agent.controller.total_inference_cost
@@ -340,20 +343,39 @@ async def run_episode(env, agent):
             "total_cost": float(step_total_cost)
         })
 
+        # ★追加: 1000 step に到達した瞬間の経過時間（秒）を記録
+        if step == 1000 and time_at_1000_steps is None:
+            time_at_1000_steps = time.time() - start_time
+
     print_and_save(f"Episode finished at step {step} with rewards {reward_tracker}")
 
-    # save results in minutes
-    total_duration = time.time() - start_time
-    total_duration = total_duration / 60
+    # ★エピソード全体の経過時間（秒）
+    episode_duration_sec = time.time() - start_time
+
+    # 1000 step 未満で終わった場合は NaN を入れておく
+    if time_at_1000_steps is None:
+        time_at_1000_steps = np.nan
+
+    # 1 step あたりの実行時間だけ取り出してリストにする
+    step_exec_times = [m["exec_time_sec"] for m in step_metrics]
+
     # make dataframe - columns for agent_type, scenario, reward, datetime
-    df_results = pd.DataFrame({'agent_type': [agent_label], 'scenario': [env.eval_num], 
-                               'reward': [reward_tracker['player_0']], 'steps': [step], 'interaction_num': [agent.interaction_num],
-                               'duration': [total_duration], 'cost': [total_cost], 'datetime': [date_time_str]})
-    # df_results = pd.DataFrame({'agent_type': [full_agent_type], 'scenario': [scenario_num], 
-    #                             'reward': [reward_tracker['player_0']], 'steps': [step], 
-    #                             'avg_optimal': [avg_optimal], 'avg_actual': [avg_actual], 'difference': [diff],
-    #                             'interaction_num': [agent.interaction_num], 'reward_per_interaction': [reward_tracker['player_0']/agent.interaction_num],
-    #                             'duration': [total_duration], 'cost': [total_cost], 'datetime': [date_time_str]})
+    df_results = pd.DataFrame({
+        'agent_type': [agent_label],
+        'scenario': [env.eval_num], 
+        'reward': [reward_tracker['player_0']],
+        'steps': [step],
+        'interaction_num': [agent.interaction_num],
+        # ★1000 step に到達した時点の時間（秒）
+        'duration_1000_steps_sec': [time_at_1000_steps],
+        # ★エピソード全体の時間（秒）
+        'episode_duration_sec': [episode_duration_sec],
+        'cost': [total_cost],
+        'datetime': [date_time_str],
+        # ★1 step あたり時間のリスト（pandas が文字列として保存します）
+        'step_exec_times_sec': [step_exec_times],
+    })
+
     all_results_file = './results/rws_scores.csv'
     if os.path.exists(all_results_file):
         df_all_results = pd.read_csv(all_results_file, index_col=0)
