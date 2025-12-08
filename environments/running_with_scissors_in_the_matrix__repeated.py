@@ -77,7 +77,9 @@ async def run_episode(env, agent):
     user_message_data_list = []
     interaction_rewards = {}
     if agent.agent_type == 'hm' or agent.agent_type == 'planreact':
-        hls_response, subgoal_response, hls_user_msg, subgoal_user_msg = await agent.two_level_plan(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)   
+        hls_response, subgoal_response, hls_user_msg, subgoal_user_msg = await agent.two_level_plan(
+            state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+        )
         print_and_save(f"Initial response: {hls_response}")
         print_and_save('\n')
         response_data_list.append(hls_response)
@@ -89,9 +91,14 @@ async def run_episode(env, agent):
         goal_and_plan = {}
         state_info_dict_list = [state_info_dict]
         reward_during_plan = 0.0
-        subgoal_user_msg, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, goal_and_plan, state_info_dict_list, reward_during_plan)
+        subgoal_user_msg, subgoal_response, goal_and_plan = await agent.subgoal_module(
+            state, execution_outcomes, get_action_from_response_errors,
+            reward_tracker, step, goal_and_plan, state_info_dict_list, reward_during_plan
+        )
     else:
-        subgoal_user_msg, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
+        subgoal_user_msg, subgoal_response, goal_and_plan = await agent.subgoal_module(
+            state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+        )
     print_and_save(agent.agent_id, goal_and_plan)
     response_data_list.append(subgoal_response)
     user_message_data_list.append(subgoal_user_msg)
@@ -111,11 +118,10 @@ async def run_episode(env, agent):
     after_interaction = False
     inventory_per_step = []
 
-    # step時間測定
-    step_metrics = []         # 各ステップの計測結果を格納するリスト
-    last_total_cost = total_cost  # ステップごとのコスト増分を出すための基準
+    # ステップごとのコスト増分を出すための基準
+    last_total_cost = total_cost
 
-    # ★追加: 1000 step 到達時点の経過時間（秒）
+    # 1000 step 到達時の経過時間（秒）
     time_at_1000_steps = None
 
     while not done:
@@ -159,12 +165,17 @@ async def run_episode(env, agent):
                 # put INTERACT action back in to come back here on the next step
                 agent.all_actions.put(next_action)
             elif agent.interact_steps >= 20:
-                execution_outcomes[agent.agent_id] = 'Been waiting for an interaction at this coordinate for 20 steps. Move to a different location to find opponent.'
+                execution_outcomes[agent.agent_id] = (
+                    'Been waiting for an interaction at this coordinate for 20 steps. '
+                    'Move to a different location to find opponent.'
+                )
             else:
                 print_and_save(f"HERE IN THE INTERACTION LOOP")
         elif action:
             # use one step lookahead to see if action takes us to valid/intended location
-            action, agent_goals_and_actions = agent.check_plan_one_step(action, state, env, agent_goals_and_actions)
+            action, agent_goals_and_actions = agent.check_plan_one_step(
+                action, state, env, agent_goals_and_actions
+            )
             step_actions_dict[agent.agent_id] = ACTION_IDX[action]
         else:
             agents_no_actions.append(agent)
@@ -174,16 +185,21 @@ async def run_episode(env, agent):
             if agent.agent_type == 'reflexion':
                 state_info_dict = agent.get_state_info(state, step)
                 state_info_dict_list.append(state_info_dict)
-                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, goal_and_plan, state_info_dict_list, reward_during_plan)
+                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors,
+                    reward_tracker, step, goal_and_plan, state_info_dict_list, reward_during_plan
+                )
                 reward_during_plan = 0
             else:
-                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step)
+                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors, reward_tracker, step
+                )
             print_and_save(f"User message: {user_message}")
-            print_and_save(f"Response: {subgoal_response}")   
+            print_and_save(f"Response: {subgoal_response}")
             print_and_save(agent.agent_id, goal_and_plan)
             user_message_data_list.append(user_message)
             response_data_list.append(subgoal_response)
-            agent_goals_and_actions[agent.agent_id] = goal_and_plan                        
+            agent_goals_and_actions[agent.agent_id] = goal_and_plan
             parse_outcome = agent.get_actions_from_plan(goal_and_plan, plan_grid, state)
             get_action_from_response_errors[agent.agent_id] = parse_outcome
             action = agent.act()
@@ -202,7 +218,9 @@ async def run_episode(env, agent):
                 agent.all_actions.put(next_action)
             else:
                 # use one step lookahead to see if action takes us to valid/intended location
-                action, agent_goals_and_actions = agent.check_plan_one_step(action, state, env, agent_goals_and_actions)
+                action, agent_goals_and_actions = agent.check_plan_one_step(
+                    action, state, env, agent_goals_and_actions
+                )
                 step_actions_dict[agent.agent_id] = ACTION_IDX[action]
         # reset agents_no_actions
         agents_no_actions = []
@@ -210,9 +228,9 @@ async def run_episode(env, agent):
         with open(response_data_path, 'w') as file:
             data = {
                 'user_messages': user_message_data_list,
-                'response_data': response_data_list, 
+                'response_data': response_data_list,
                 'reward_tracker': reward_tracker
-                }
+            }
             json.dump(data, file, indent=4)
         total_cost = agent.controller.total_inference_cost
         print_and_save(f"Step {step} Total Inference Cost:", total_cost, new_line=False)
@@ -238,10 +256,11 @@ async def run_episode(env, agent):
                     for previous_inventory in reversed(inventory_per_step):
                         if not np.array_equal(base_inventory, previous_inventory):
                             current_inventory = previous_inventory
-                            break  # Exit the loop once the most recent different inventory is found
+                            break
                     print_and_save("Weird bug where inventory is reset to base inventory")
-                    print_and_save(f"Inventory reset to base inventory. Previous inventory: {current_inventory}")
-                    #breakpoint()
+                    print_and_save(
+                        f"Inventory reset to base inventory. Previous inventory: {current_inventory}"
+                    )
                 interaction_inventory = {
                     'rock/yellow': int(current_inventory[0]),
                     'paper/purple': int(current_inventory[1]),
@@ -260,14 +279,21 @@ async def run_episode(env, agent):
         # determine if we are in respawning phase
         reset_env = any(key.startswith('player_0') for key in state['global'])
         if during_interaction and not reset_env and not during_respawn:
-            print_and_save(f"Interaction: Agent {agent_id}, inventory: {interaction_inventory}, received reward {reward}")
-            after_interaction = True 
-            interaction_rewards = {agent_id: np.round(reward, 3) for agent_id, reward in rewards.items()}
+            print_and_save(
+                f"Interaction: Agent {agent_id}, inventory: {interaction_inventory}, received reward {reward}"
+            )
+            after_interaction = True
+            interaction_rewards = {
+                agent_id: np.round(reward, 3) for agent_id, reward in rewards.items()
+            }
             during_respawn = True
 
         done = done['__all__']
         save_obs_frames(obs, step, frame_folder)
-        print_and_save(f"Step {step} rewards: {reward_tracker}, Player 0 inventory: {state['player_0']['inventory']}")
+        print_and_save(
+            f"Step {step} rewards: {reward_tracker}, "
+            f"Player 0 inventory: {state['player_0']['inventory']}"
+        )
         if after_interaction and reset_env:
             during_interaction = False
             during_respawn = False
@@ -280,15 +306,25 @@ async def run_episode(env, agent):
             agent.interaction_history.append(interaction_dict)
             print_and_save(f"Interaction {agent.interaction_num}")
             print_and_save(f"Step: {step}, Total reward: {reward_tracker}")
-            print_and_save(f"Interaction {agent.interaction_num}: inventory={interaction_inventory}, rewards={interaction_rewards[agent.agent_id].item()}")
+            print_and_save(
+                f"Interaction {agent.interaction_num}: inventory={interaction_inventory}, "
+                f"rewards={interaction_rewards[agent.agent_id].item()}"
+            )
             print_and_save('\n')
             with open(output_data_path, 'a') as file:
-                file.write(f"Interaction {agent.interaction_num}, inventory={interaction_inventory}, rewards={interaction_rewards[agent.agent_id].item()}\n")
+                file.write(
+                    f"Interaction {agent.interaction_num}, "
+                    f"inventory={interaction_inventory}, "
+                    f"rewards={interaction_rewards[agent.agent_id].item()}\n"
+                )
                 file.write(f"{agent.interaction_history}\n")
                 file.write(f"Step: {step}, Total reward: {reward_tracker}\n\n")
             # give feedback and reset all plans
             if agent.agent_type == 'hm' or agent.agent_type == 'planreact':
-                hls_response, subgoal_response, hls_user_msg, subgoal_user_msg = await agent.two_level_plan(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=True)
+                hls_response, subgoal_response, hls_user_msg, subgoal_user_msg = await agent.two_level_plan(
+                    state, execution_outcomes, get_action_from_response_errors,
+                    reward_tracker, step, after_interaction=True
+                )
                 print_and_save(f"HLS: {hls_response}")
                 print_and_save('\n')
                 with open(output_data_path, 'a') as file:
@@ -297,10 +333,17 @@ async def run_episode(env, agent):
             elif agent.agent_type == 'reflexion':
                 state_info_dict = agent.get_state_info(state, step)
                 state_info_dict_list.append(state_info_dict)
-                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, goal_and_plan, state_info_dict_list, reward_during_plan, after_interaction=True)
+                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors,
+                    reward_tracker, step, goal_and_plan, state_info_dict_list,
+                    reward_during_plan, after_interaction=True
+                )
                 reward_during_plan = 0
             else:
-                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(state, execution_outcomes, get_action_from_response_errors, reward_tracker, step, after_interaction=True)
+                user_message, subgoal_response, goal_and_plan = await agent.subgoal_module(
+                    state, execution_outcomes, get_action_from_response_errors,
+                    reward_tracker, step, after_interaction=True
+                )
             print_and_save(f"Next subgoals: {subgoal_response}")
             with open(output_data_path, 'a') as file:
                 file.write(f"Next subgoals: {subgoal_response}\n\n")
@@ -311,19 +354,19 @@ async def run_episode(env, agent):
             goal_and_plan = agent.extract_goals_and_actions(subgoal_response)
             print_and_save(agent.agent_id, goal_and_plan)
             # set which subgoal we are on
-            goal_and_plan['subgoal_num'] = 0               
-            agent_goals_and_actions[agent.agent_id] = goal_and_plan    
+            goal_and_plan['subgoal_num'] = 0
+            agent_goals_and_actions[agent.agent_id] = goal_and_plan
             # combine all known states
             agent.combine_all_known_states(state)
-            plan_grid = make_plan_grid(goal_and_plan, env, agent)                   
+            plan_grid = make_plan_grid(goal_and_plan, env, agent)
             parse_outcome = agent.get_actions_from_plan(goal_and_plan, env.grid, state)
             get_action_from_response_errors[agent.agent_id] = parse_outcome
             after_interaction = False
-            #breakpoint()
+
         # keep track of the execution outcomes
         if not during_interaction:
             execution_outcomes = {}
-            execution_outcomes[agent.agent_id] =  agent.update_state(state)
+            execution_outcomes[agent.agent_id] = agent.update_state(state)
 
         # ステップ計測の終了・記録
         step_duration = time.perf_counter() - step_start
@@ -333,47 +376,36 @@ async def run_episode(env, agent):
         last_total_cost = step_total_cost
 
         # ログに出す（画面＋all_output_data.txt に保存）
-        print_and_save(f"Step {step} exec_time: {step_duration:.4f}s, cost+={step_cost_delta:.6f}")
+        print_and_save(
+            f"Step {step} exec_time: {step_duration:.4f}s, cost+={step_cost_delta:.6f}"
+        )
 
-        # CSV にも出せるように配列に貯めておく
-        step_metrics.append({
-            "step": step,
-            "exec_time_sec": step_duration,
-            "cost_delta": float(step_cost_delta),
-            "total_cost": float(step_total_cost)
-        })
-
-        # ★追加: 1000 step に到達した瞬間の経過時間（秒）を記録
+        # 1000 step に到達した瞬間の経過時間（秒）を記録
         if step == 1000 and time_at_1000_steps is None:
             time_at_1000_steps = time.time() - start_time
 
     print_and_save(f"Episode finished at step {step} with rewards {reward_tracker}")
 
-    # ★エピソード全体の経過時間（秒）
+    # エピソード全体の経過時間（秒）
     episode_duration_sec = time.time() - start_time
 
     # 1000 step 未満で終わった場合は NaN を入れておく
     if time_at_1000_steps is None:
         time_at_1000_steps = np.nan
 
-    # 1 step あたりの実行時間だけ取り出してリストにする
-    step_exec_times = [m["exec_time_sec"] for m in step_metrics]
-
-    # make dataframe - columns for agent_type, scenario, reward, datetime
+    # 集約結果の DataFrame
     df_results = pd.DataFrame({
         'agent_type': [agent_label],
-        'scenario': [env.eval_num], 
+        'scenario': [env.eval_num],
         'reward': [reward_tracker['player_0']],
         'steps': [step],
         'interaction_num': [agent.interaction_num],
-        # ★1000 step に到達した時点の時間（秒）
+        # 1000 step 到達時の時間（秒）
         'duration_1000_steps_sec': [time_at_1000_steps],
-        # ★エピソード全体の時間（秒）
+        # エピソード全体の時間（秒）
         'episode_duration_sec': [episode_duration_sec],
         'cost': [total_cost],
         'datetime': [date_time_str],
-        # ★1 step あたり時間のリスト（pandas が文字列として保存します）
-        'step_exec_times_sec': [step_exec_times],
     })
 
     all_results_file = './results/rws_scores.csv'
@@ -385,3 +417,4 @@ async def run_episode(env, agent):
     df_all_results.to_csv(all_results_file)
 
     return frame_folder
+
