@@ -1,4 +1,4 @@
-,agent_type,scenario,reward,steps,interaction_num,duration,cost,datetime,duration_1000_steps_sec,episode_duration_sec,step_exec_times_sec
+,agent_type,scenario,reward,steps,interaction_num,duration,cost,datetime,duration_1000_steps_sec
 0,hm_llama3,0,-15.787,1599,28,,0.0,2025-12-07_07-39-44,759.6488425731659,1270.7040407657623,
 1,hm_llama3,0,0.4389999999999996,1699,32,,0.0,2025-12-07_08-11-53,836.9967041015625,1427.2849397659302,
 2,hm_llama3,0,44.422,1099,20,,0.0,2025-12-07_09-31-00,758.9137196540833,846.9091725349426,
