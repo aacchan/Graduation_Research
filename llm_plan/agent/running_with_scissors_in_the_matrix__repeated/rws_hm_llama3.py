@@ -45,7 +45,7 @@ class DecentralizedAgent(abc.ABC):
         self.alpha = 0.3  # learning rate for updating hypothesis values
         self.correct_guess_reward = 1
         self.good_hypothesis_thr = 0.7
-        self.top_k = 5  # number of top hypotheses to evaluate
+        self.top_k = 9  # number of top hypotheses to evaluate
         self.self_improve = config.get("self_improve", False)
         self.temperature = config.get("temperature", 0.2)  # ★ 追加：デフォルト温度
         player_key = self.agent_id
