@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from transformers import AutoTokenizer
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 import asyncio
@@ -29,6 +30,20 @@ class AsyncGPTController:
     - force: "none" | "dict" | "tuple" | "subgoal"
     """
     def __init__(self, llm: Any, model_id: str, **model_args) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Meta-Llama-3-8B-Instruct",
+            use_fast=True
+        )
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ]
+        prompt_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True
+        )
+        print(f"[PROMPT TOKENS] {len(prompt_ids)} | force={force}")
         self.llm = llm
         self.model_id = model_id
         self.model_args = model_args
