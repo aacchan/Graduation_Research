@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-from transformers import AutoTokenizer
 from __future__ import annotations
+from transformers import AutoTokenizer
 from typing import Any, Dict, List, Optional, Union
 import asyncio
 
