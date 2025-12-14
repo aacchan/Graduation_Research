@@ -33,16 +33,6 @@ class AsyncGPTController:
             "meta-llama/Meta-Llama-3-8B-Instruct",
             use_fast=True
         )
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ]
-        prompt_ids = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True
-        )
-        print(f"[PROMPT TOKENS] {len(prompt_ids)} | force={force}")
         self.llm = llm
         self.model_id = model_id
         self.model_args = model_args
@@ -92,6 +82,14 @@ class AsyncGPTController:
         force: str = "none",
     ) -> Union[str, List[str]]:
         messages = self.get_prompt(system_message=expertise, user_message=message)
+        # ===== prompt token count（エージェントが作ったプロンプトのトークン数）=====
+        prompt_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True
+        )
+        print(f"[PROMPT TOKENS] {len(prompt_ids)} | force={force}")
+        # ================================================================
         response = await self.get_response(messages=messages, temperature=temperature, force=force)
         cost = self.calc_cost(response)
         model_for_log = self.model_args.get('model', self.llm.model)
