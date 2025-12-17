@@ -744,6 +744,17 @@ class DecentralizedAgent(abc.ABC):
         except Exception as e:
             return f"Error parsing function arguments: {e}"
         func = getattr(action_funcs, func_name)
+        def dbg_cell(grid, p):
+            x,y = p
+            v_xy = grid[x,y] if 0 <= x < grid.shape[0] and 0 <= y < grid.shape[1] else None
+            v_yx = grid[y,x] if 0 <= y < grid.shape[0] and 0 <= x < grid.shape[1] else None
+            return v_xy, v_yx, grid.shape
+            
+        print(f"[PATHDBG step={step}] start={start} goal={goal} "
+              f"in_wall={goal in state['global']['wall']} "
+              f"grid(start)[x,y]/[y,x]={dbg_cell(grid,start)} "
+              f"grid(goal)[x,y]/[y,x]={dbg_cell(grid,goal)}")
+
         if func_name == "move_to":
             start, goal = func_args
             paths, actions, current_orient, path_found = func(start, goal, grid, self.orientation)
