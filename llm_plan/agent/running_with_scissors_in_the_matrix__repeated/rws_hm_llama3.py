@@ -750,7 +750,7 @@ class DecentralizedAgent(abc.ABC):
             v_yx = grid[y,x] if 0 <= y < grid.shape[0] and 0 <= x < grid.shape[1] else None
             return v_xy, v_yx, grid.shape
             
-        print(f"[PATHDBG step={step}] start={start} goal={goal} "
+        print(f"start={start} goal={goal} "
               f"in_wall={goal in state['global']['wall']} "
               f"grid(start)[x,y]/[y,x]={dbg_cell(grid,start)} "
               f"grid(goal)[x,y]/[y,x]={dbg_cell(grid,goal)}")
