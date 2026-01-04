@@ -2,6 +2,9 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 import asyncio
+import json
+from datetime import datetime
+from pathlib import Path
 
 from llm_plan.structured_schemas import get_schema
 
@@ -27,13 +30,34 @@ class AsyncGPTController:
     """
     Async chat LLM controller（旧互換のバッチAPI付き）
     - force: "none" | "dict" | "tuple" | "subgoal"
+
+    追加仕様:
+    - log_path が指定されている場合、入出力プロンプトのみ JSONL で追記保存する
+      - input: messages（role/content）
+      - output: 生成結果（str or List[str]）
     """
-    def __init__(self, llm: Any, model_id: str, **model_args) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        model_id: str,
+        *,
+        log_path: Optional[Union[str, Path]] = None,
+        log_include_meta: bool = True,
+        **model_args,
+    ) -> None:
         self.llm = llm
         self.model_id = model_id
         self.model_args = model_args
         self.all_responses: List[Dict[str, Any]] = []
         self.total_inference_cost: float = 0.0
+
+        # I/O ログ設定
+        self.log_path: Optional[Path] = Path(log_path) if log_path else None
+        self.log_include_meta = log_include_meta
+        self._log_lock = asyncio.Lock()
+
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def calc_cost(self, response) -> float:
         model_name = getattr(response, 'model', '') or ''
@@ -52,6 +76,50 @@ class AsyncGPTController:
             {"role": "system", "content": system_message},
             {"role": "user",   "content": user_message},
         ]
+
+    async def _append_io_log(
+        self,
+        *,
+        messages: List[Dict[str, str]],
+        output: Union[str, List[str], None],
+        temperature: float,
+        force: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        入出力（プロンプト）だけを JSONL に追記する。
+        output が None の場合はエラー扱い（error を残す）にできる。
+        """
+        if not self.log_path:
+            return
+
+        record: Dict[str, Any] = {
+            "input": messages,
+            "output": output,
+        }
+
+        # 「プロンプトだけ」に厳密にしたいなら、下の meta 部分を丸ごと削除してください。
+        if self.log_include_meta:
+            record["meta"] = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "model_id": self.model_id,
+                "model": self.model_args.get("model", getattr(self.llm, "model", "")),
+                "temperature": temperature,
+                "force": force,
+            }
+            if error:
+                record["meta"]["error"] = error
+
+        line = json.dumps(record, ensure_ascii=False)
+
+        # gather 等の同時実行でも行が混ざらないよう排他
+        async with self._log_lock:
+            await asyncio.to_thread(self._sync_append_line, self.log_path, line)
+
+    @staticmethod
+    def _sync_append_line(path: Path, line: str) -> None:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
     async def get_response(
         self,
@@ -78,20 +146,41 @@ class AsyncGPTController:
         force: str = "none",
     ) -> Union[str, List[str]]:
         messages = self.get_prompt(system_message=expertise, user_message=message)
-        response = await self.get_response(messages=messages, temperature=temperature, force=force)
-        cost = self.calc_cost(response)
-        model_for_log = self.model_args.get('model', self.llm.model)
-        print(f"Cost for running {model_for_log}: {cost}")
 
-        if len(response.choices) == 1:
-            response_str: Union[str, List[str]] = response.choices[0].message.content
-        else:
-            response_str = [c.message.content for c in response.choices]
+        try:
+            response = await self.get_response(messages=messages, temperature=temperature, force=force)
+            cost = self.calc_cost(response)
+            model_for_log = self.model_args.get('model', self.llm.model)
+            print(f"Cost for running {model_for_log}: {cost}")
 
-        full = {'response': response, 'response_str': response_str, 'cost': cost}
-        self.total_inference_cost += cost
-        self.all_responses.append(full)
-        return full['response_str']
+            if len(response.choices) == 1:
+                response_str: Union[str, List[str]] = response.choices[0].message.content
+            else:
+                response_str = [c.message.content for c in response.choices]
+
+            # 入出力プロンプトだけ保存（レスポンス本体は保存しない）
+            await self._append_io_log(
+                messages=messages,
+                output=response_str,
+                temperature=temperature,
+                force=force,
+            )
+
+            full = {'response': response, 'response_str': response_str, 'cost': cost}
+            self.total_inference_cost += cost
+            self.all_responses.append(full)
+            return full['response_str']
+
+        except Exception as e:
+            # 失敗時も入力だけは残す（出力は None、error を残す）
+            await self._append_io_log(
+                messages=messages,
+                output=None,
+                temperature=temperature,
+                force=force,
+                error=repr(e),
+            )
+            raise
 
     # ===== 旧互換のバッチAPI =====
 
@@ -131,6 +220,7 @@ class AsyncGPTController:
             temperature = self.model_args.get("temperature", 0.2)
         coros = [self.run(expertise, m, temperature, force=force) for m in messages]
         return await asyncio.gather(*coros)
+
 
 
 
