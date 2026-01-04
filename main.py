@@ -22,12 +22,14 @@ def setup_environment(substrate_name, scenario_num):
     env = MeltingPotLLMEnv(substrate_name, sprite_label_path, scenario_num)
     return env
 
-def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_type='gpt4'):
+def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_type='gpt4',log_path=None, log_include_meta=False):
     if llm_type == 'gpt4':
         llm = AsyncChatLLM(kwargs={'api_key': api_key, 'model': 'gpt-4o'})
         controller = AsyncGPTController(
             llm=llm,
             model_id=model_id,
+			log_path=log_path,                 
+            log_include_meta=log_include_meta,
             **model_settings
         )
     elif llm_type == 'gpt35':
