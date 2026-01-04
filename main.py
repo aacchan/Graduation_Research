@@ -17,28 +17,43 @@ print("[DEBUG] AGC file:", _agc.__file__)
 print("[DEBUG] has AsyncGPTController:", hasattr(_agc, "AsyncGPTController"))
 print("[DEBUG] has async_batch_prompt:", hasattr(_agc.AsyncGPTController, "async_batch_prompt"))
 
+
 def setup_environment(substrate_name, scenario_num):
     sprite_label_path = f'./llm_plan/sprite_labels/{substrate_name}'
     env = MeltingPotLLMEnv(substrate_name, sprite_label_path, scenario_num)
     return env
 
-def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_type='gpt4',log_path=None, log_include_meta=False):
+
+def setup_agent(
+    api_key,
+    model_id,
+    model_settings,
+    substrate,
+    agent_type,
+    llm_type='llama3',
+    log_path=None,
+    log_include_meta=False,
+):
     if llm_type == 'gpt4':
         llm = AsyncChatLLM(kwargs={'api_key': api_key, 'model': 'gpt-4o'})
         controller = AsyncGPTController(
             llm=llm,
             model_id=model_id,
-			log_path=log_path,                 
+            log_path=log_path,
             log_include_meta=log_include_meta,
             **model_settings
         )
+
     elif llm_type == 'gpt35':
         llm = AsyncChatLLM(kwargs={'api_key': api_key, 'model': 'gpt-3.5-turbo-1106'})
         controller = AsyncGPTController(
             llm=llm,
             model_id=model_id,
+            log_path=log_path,
+            log_include_meta=log_include_meta,
             **model_settings
         )
+
     elif llm_type == 'llama3':
         kwargs = {
             'api_key': "EMPTY",
@@ -51,8 +66,11 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
         controller = AsyncGPTController(
             llm=llm,
             model_id=model_id,
+            log_path=log_path,
+            log_include_meta=log_include_meta,
             **model_settings
         )
+
     elif llm_type == 'llama2':
         kwargs = {
             'api_key': "EMPTY",
@@ -63,8 +81,12 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
         }
         llm = AsyncChatLLM(kwargs=kwargs)
         controller = AsyncGPTController(
-            llm=llm, model_id=model_id, **model_settings
-        )    
+            llm=llm,
+            model_id=model_id,
+            log_path=log_path,
+            log_include_meta=log_include_meta,
+            **model_settings
+        )
 
     elif llm_type == 'mixtral':
         kwargs = {
@@ -78,9 +100,12 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
         controller = AsyncGPTController(
             llm=llm,
             model_id=model_id,
+            log_path=log_path,
+            log_include_meta=log_include_meta,
             **model_settings
         )
-
+    else:
+        raise ValueError(f"Unknown llm_type: {llm_type}")
 
     agent_config_obj = {'agent_id': model_id}
 
@@ -95,13 +120,15 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
     agent = agent_class(agent_config_obj, controller)
     return agent
 
-async def main_async(substrate_name, scenario_num, agent_type, llm_type):
-    if llm_type == 'gpt4' or llm_type == 'gpt35':
+
+async def main_async(substrate_name, scenario_num, agent_type, llm_type, seed, io_log_dir=None, io_log_include_meta=False):
+    if llm_type in ('gpt4', 'gpt35'):
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             raise ValueError("No API key found. Please set the OPENAI_API_KEY environment variable.")
     else:
         api_key = "EMPTY"
+
     if llm_type == 'gpt4':
         model_settings = {
             "model": "gpt-4o",
@@ -133,7 +160,7 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
             "temperature": 0.2,
             "top_p": 1.0,
             "n": 10,
-        }    
+        }
     elif llm_type == 'mixtral':
         model_settings = {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -142,21 +169,44 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
             "top_p": 1.0,
             "n": 10,
         }
+    else:
+        raise ValueError(f"Unknown llm_type: {llm_type}")
 
-    agent = setup_agent(api_key, model_id=f"player_0", model_settings=model_settings, substrate=substrate_name, agent_type=agent_type, llm_type=llm_type)
-    agent.agent_type = agent_type 
+    # ---- 入出力ログ保存先（指定されたときだけ有効）----
+    log_path = None
+    if io_log_dir:
+        os.makedirs(io_log_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(
+            io_log_dir,
+            f"{substrate_name}_sc{scenario_num}_{agent_type}_{llm_type}_seed{seed}_{ts}.jsonl"
+        )
+        print(f"[DEBUG] I/O log path: {log_path}")
+
+    agent = setup_agent(
+        api_key,
+        model_id="player_0",
+        model_settings=model_settings,
+        substrate=substrate_name,
+        agent_type=agent_type,
+        llm_type=llm_type,
+        log_path=log_path,
+        log_include_meta=io_log_include_meta,
+    )
+    agent.agent_type = agent_type
     agent.llm_type = llm_type
-    
+
     env = setup_environment(substrate_name, scenario_num)
 
     run_episode_module = importlib.import_module(f"environments.{substrate_name}")
     run_episode = run_episode_module.run_episode
-    
+
     frame_folder = await run_episode(env, agent)
 
     # Save video of the frames
     create_video_script = './create_videos.sh'
     subprocess.call([create_video_script, frame_folder])
+
 
 def main():
     parser = argparse.ArgumentParser(description='Run the multi-agent environment.')
@@ -165,6 +215,13 @@ def main():
     parser.add_argument('--agent_type', type=str, default='hm', help='Agent type')
     parser.add_argument('--llm_type', type=str, default='gpt4', help='LLM Type')
     parser.add_argument('--num_seeds', type=int, default=1, help='Number of seeds')
+
+    # 追加：入出力プロンプトログ
+    parser.add_argument('--io_log_dir', type=str, default=None,
+                        help='If set, save LLM input/output prompts as JSONL under this dir')
+    parser.add_argument('--io_log_include_meta', action='store_true',
+                        help='Include metadata in the log (optional)')
+
     args = parser.parse_args()
 
     substrate_dict = {
@@ -174,11 +231,21 @@ def main():
         'rws_arena': 'running_with_scissors_in_the_matrix__arena',
     }
     substrate_name = substrate_dict[args.substrate]
-    
+
     loop = asyncio.get_event_loop()
     for seed in range(args.num_seeds):
-        loop.run_until_complete(main_async(substrate_name, args.scenario_num, args.agent_type, args.llm_type))
+        loop.run_until_complete(
+            main_async(
+                substrate_name,
+                args.scenario_num,
+                args.agent_type,
+                args.llm_type,
+                seed,
+                args.io_log_dir,
+                args.io_log_include_meta,
+            )
+        )
+
 
 if __name__ == "__main__":
     main()
-	
