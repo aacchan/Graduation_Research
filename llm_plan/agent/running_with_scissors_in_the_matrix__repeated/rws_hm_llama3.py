@@ -122,6 +122,20 @@ class DecentralizedAgent(abc.ABC):
             if k.startswith("player_1" if self.agent_id == "player_0" else "player_0")
         ]
 
+
+        player_position_list = next(iter(player_position.values()))
+        current_position = player_position_list[0] if player_position_list else None
+
+        ttl_steps = 100
+        retrieved_memory = self.retrieve_memory_for_prompt(
+            current_position=current_position,
+            current_step=step,
+            ttl_steps=ttl_steps,
+            target_only=True,
+            include_players=True,
+            include_distance=False,
+        )
+
         strategy_request = f"""
             Strategy Request:
             You are at step {step} of the game.
@@ -143,7 +157,7 @@ class DecentralizedAgent(abc.ABC):
             - Observable Blue Box Locations: {blue_locations}
             - Observable Purple Box Locations: {purple_locations}
             - Observable Opponent Locations: {opponent_locations}
-            - Previously seen states from memory (format: ((x,y), step last observed): {self.memory_states}
+            - Retrieved memories (TTL={ttl_steps} steps; format: ((x,y), step_last_observed)): {retrieved_memory}
             
             {strategy_request}
             """
@@ -156,10 +170,19 @@ class DecentralizedAgent(abc.ABC):
         return abs(point1[0] - point2[0]) + abs(point1[1] - point2[1])
 
     def update_memory_states_with_distance(self, current_location: Tuple[int, int]):
-        for entity_type, locations in self.memory_states.items():
-            for i, (location, step_last_observed, distance) in enumerate(locations):
-                distance = f"distance: {self.calculate_manhattan_distance(current_location, location)}"
-                self.memory_states[entity_type][i] = (location, step_last_observed, distance)
+        """(Optional) enrich memory entries with a distance string from current_location."""
+        def entry_loc_step(entry):
+            if isinstance(entry, tuple) and len(entry) >= 2 and isinstance(entry[0], tuple):
+                return entry[0], entry[1]
+            return entry, -10**9
+
+        for entity_type, entries in self.memory_states.items():
+            new_entries = []
+            for entry in entries:
+                loc, step_last = entry_loc_step(entry)
+                dist = f"distance: {self.calculate_manhattan_distance(current_location, loc)}"
+                new_entries.append((loc, step_last, dist))
+            self.memory_states[entity_type] = new_entries
 
     def generate_feedback_user_message(
         self, state, execution_outcomes, get_action_from_response_errors, rewards, step
@@ -186,6 +209,16 @@ class DecentralizedAgent(abc.ABC):
             for k, v in ego_state.items()
             if k.startswith("player_1" if self.agent_id == "player_0" else "player_0")
         ]
+
+        ttl_steps = 100
+        retrieved_memory = self.retrieve_memory_for_prompt(
+            current_position=current_position,
+            current_step=step,
+            ttl_steps=ttl_steps,
+            target_only=True,
+            include_players=True,
+            include_distance=True,
+        )
 
         rewards_str = "\n".join(f"- {player}: {reward}" for player, reward in rewards.items())
 
@@ -256,7 +289,7 @@ class DecentralizedAgent(abc.ABC):
             - Observable Blue Box Locations: {blue_locations}
             - Observable Purple Box Locations: {purple_locations}
             - Observable Opponent Locations: {opponent_locations}
-            - Previously seen states from memory (format: ((x,y), step last observed, distance from current location): {self.memory_states}
+            - Retrieved memories (TTL={ttl_steps} steps; format: ((x,y), step_last_observed, distance from current location)): {retrieved_memory}
 
             Execution Outcomes:
             {execution_outcomes}
@@ -841,20 +874,127 @@ class DecentralizedAgent(abc.ABC):
                         return output
 
     def update_memory(self, state, step):
+        """Update memory with newly observed entity locations.
+
+        Memory format (per entity_type):
+          - list[tuple[tuple[int,int], int]]  -> [((x,y), step_last_observed), ...]
+        """
         ego_state = state[self.agent_id]
         player_key = self.agent_id
-        opponent_key = ["player_1" if self.agent_id == "player_0" else "player_0"][0]
+        opponent_key = "player_1" if self.agent_id == "player_0" else "player_0"
+
+        def entry_loc(entry):
+            # entry may be (loc, step) or (loc, step, distance) or a raw loc tuple
+            if isinstance(entry, tuple) and len(entry) >= 2 and isinstance(entry[0], tuple):
+                return entry[0]
+            return entry
+
         for entity_type in ["yellow_box", "blue_box", "purple_box", "ground", player_key, opponent_key]:
-            if entity_type[:6] == "player":
+            if entity_type.startswith("player"):
                 observed_locations = [v[0] for k, v in ego_state.items() if k.startswith(entity_type)]
             else:
                 observed_locations = ego_state.get(entity_type, [])
+
             for location in observed_locations:
+                # Remove this location from other entity memories (compare by location only).
                 for other_entity in self.memory_states:
-                    if other_entity != entity_type:
-                        self.memory_states[other_entity] = [loc for loc in self.memory_states[other_entity] if loc != location]
-                self.memory_states[entity_type] = [loc for loc in self.memory_states[entity_type] if loc != location]
-                self.memory_states[entity_type].append(location)
+                    if other_entity == entity_type:
+                        continue
+                    self.memory_states[other_entity] = [
+                        e for e in self.memory_states[other_entity] if entry_loc(e) != location
+                    ]
+
+                # De-duplicate within the same entity, then append with latest step.
+                self.memory_states[entity_type] = [
+                    e for e in self.memory_states[entity_type] if entry_loc(e) != location
+                ]
+                self.memory_states[entity_type].append((location, step))
+
+    def _target_resource_types_from_next_inventory(self) -> List[str]:
+        """Return resource entity types (e.g., 'blue_box') needed for the current my_next_inventory."""
+        mapping = {
+            "rock/yellow": "yellow_box",
+            "paper/purple": "purple_box",
+            "scissors/blue": "blue_box",
+        }
+        inv = (self.next_inventories or {}).get("my_next_inventory", {}) if hasattr(self, "next_inventories") else {}
+        needed = []
+        for k, v in inv.items():
+            try:
+                cnt = int(v)
+            except Exception:
+                cnt = 0
+            if cnt > 0 and k in mapping:
+                needed.append(mapping[k])
+        # Ensure deterministic order (optional)
+        order = {"yellow_box": 0, "blue_box": 1, "purple_box": 2}
+        needed.sort(key=lambda x: order.get(x, 99))
+        return needed
+
+    def retrieve_memory_for_prompt(
+        self,
+        current_position: Optional[Tuple[int, int]],
+        current_step: int,
+        ttl_steps: int = 100,
+        max_per_type: int = 12,
+        target_only: bool = True,
+        include_players: bool = True,
+        include_distance: bool = False,
+    ) -> Dict[str, List[Tuple]]:
+        """Lightweight RAG over memory_states.
+
+        - Filters to target resource types (based on my_next_inventory) if target_only=True.
+        - Applies TTL (drops items last seen > ttl_steps ago).
+        - Returns top entries per entity type, prioritizing near (if current_position) and recent.
+        """
+        def parse_entry(entry):
+            # Normalize to (loc, step_last_observed)
+            if isinstance(entry, tuple) and len(entry) >= 2 and isinstance(entry[0], tuple):
+                loc = entry[0]
+                step_last = entry[1]
+                return loc, step_last
+            # Fallback: raw loc
+            return entry, -10**9
+
+        def manhattan(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+        types = []
+        if target_only:
+            types.extend(self._target_resource_types_from_next_inventory())
+        else:
+            types.extend(["yellow_box", "blue_box", "purple_box"])
+
+        if include_players:
+            types.extend(["player_0", "player_1"])
+
+        out: Dict[str, List[Tuple]] = {}
+        for t in types:
+            entries = self.memory_states.get(t, [])
+            filtered = []
+            for e in entries:
+                loc, seen_step = parse_entry(e)
+                if seen_step != -10**9 and (current_step - seen_step) > ttl_steps:
+                    continue
+                if current_position is not None and isinstance(loc, tuple):
+                    dist = manhattan(current_position, loc)
+                else:
+                    dist = 10**9
+                filtered.append((loc, seen_step, dist))
+
+            # sort by (dist, newer first)
+            filtered.sort(key=lambda x: (x[2], -(x[1] if x[1] != -10**9 else -10**9)))
+
+            top = filtered[:max_per_type]
+            if include_distance:
+                out[t] = [(loc, seen_step, f"distance: {dist}") for loc, seen_step, dist in top]
+            else:
+                out[t] = [(loc, seen_step) for loc, seen_step, _dist in top]
+
+        # drop empty keys to keep prompt small
+        out = {k: v for k, v in out.items() if v}
+        return out
+
 
     def interact(self, state, location):
         ego_state = state[self.agent_id]
@@ -935,10 +1075,17 @@ class DecentralizedAgent(abc.ABC):
         for key, coords in ego_state.items():
             if key != "inventory" and key != "wall":
                 self.all_known_states[key] = set(coords)
-        for key, coords in self.memory_states.items():
+
+        def entry_loc(entry):
+            if isinstance(entry, tuple) and len(entry) >= 2 and isinstance(entry[0], tuple):
+                return entry[0]
+            return entry
+
+        for key, entries in self.memory_states.items():
             if key not in self.all_known_states:
                 self.all_known_states[key] = set()
-            for coord in coords:
-                self.all_known_states[key].add(coord)
+            for entry in entries:
+                self.all_known_states[key].add(entry_loc(entry))
+
         for key in self.all_known_states:
             self.all_known_states[key] = list(self.all_known_states[key])
