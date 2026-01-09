@@ -93,7 +93,7 @@ def setup_agent(api_key, model_id, model_settings, substrate, agent_type, llm_ty
     agent = agent_class(agent_config_obj, controller)
     return agent
 
-async def main_async(substrate_name, scenario_num, agent_type, llm_type):
+async def main_async(substrate_name, scenario_num, agent_type, llm_type, io_log_dir=None, io_log_path=None, io_log_mode=None):
     if llm_type == 'gpt4' or llm_type == 'gpt35':
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
@@ -141,6 +141,27 @@ async def main_async(substrate_name, scenario_num, agent_type, llm_type):
             "n": 10,
         }
 
+    # --- IO logging (prompt/response) ---
+    # Map CLI flags to AsyncGPTController's expected argument name: log_path.
+    # If only a directory is given, we auto-create a timestamped JSONL file inside it.
+    log_path = None
+    if io_log_path:
+        os.makedirs(os.path.dirname(io_log_path) or '.', exist_ok=True)
+        log_path = io_log_path
+    elif io_log_dir:
+        os.makedirs(io_log_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_path = os.path.join(io_log_dir, f'io_log_{ts}.jsonl')
+    if log_path is not None:
+        # Primary key used by current AsyncGPTController implementation
+        model_settings['log_path'] = log_path
+        # Also pass through alternative keys (harmless if unused)
+        model_settings['io_log_path'] = log_path
+        model_settings['log_dir'] = io_log_dir
+        model_settings['io_log_dir'] = io_log_dir
+    if io_log_mode is not None:
+        model_settings['io_log_mode'] = io_log_mode
+
     agent = setup_agent(api_key, model_id=f"player_0", model_settings=model_settings, substrate=substrate_name, agent_type=agent_type, llm_type=llm_type)
     agent.agent_type = agent_type 
     agent.llm_type = llm_type
@@ -163,6 +184,12 @@ def main():
     parser.add_argument('--agent_type', type=str, default='hm', help='Agent type')
     parser.add_argument('--llm_type', type=str, default='gpt4', help='LLM Type')
     parser.add_argument('--num_seeds', type=int, default=1, help='Number of seeds')
+    parser.add_argument('--io_log_dir', '--io-log-dir', type=str, default=None,
+                        help='Directory to write IO logs (prompts/responses). If set, a timestamped io_log_*.jsonl is created.')
+    parser.add_argument('--io_log_path', '--io-log-path', type=str, default=None,
+                        help='Explicit IO log file path (overrides --io_log_dir).')
+    parser.add_argument('--io_log_mode', '--io-log-mode', type=str, default=None, choices=['jsonl', 'json'],
+                        help='Log format hint passed to controller (if supported).')
     args = parser.parse_args()
 
     substrate_dict = {
@@ -175,7 +202,7 @@ def main():
     
     loop = asyncio.get_event_loop()
     for seed in range(args.num_seeds):
-        loop.run_until_complete(main_async(substrate_name, args.scenario_num, args.agent_type, args.llm_type))
+        loop.run_until_complete(main_async(substrate_name, args.scenario_num, args.agent_type, args.llm_type, args.io_log_dir, args.io_log_path, args.io_log_mode))
 
 if __name__ == "__main__":
     main()
