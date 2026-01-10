@@ -69,7 +69,13 @@ class TestRAGPrompt(unittest.TestCase):
 
         prompt = agent.generate_hls_user_message(state, step=self.step)
 
-        self.assertIn("Previously seen states from memory", prompt)
+        self.assertIn("Retrieved memory context (RAG)", prompt)
+        self.assertIn("RAG_CONTEXT_BEGIN", prompt)
+        self.assertIn("RAG_CONTEXT_END", prompt)
+        self.assertNotIn("Previously seen states from memory", prompt)
+        self.assertNotIn("{'yellow_box'", prompt)
+
+
         # 観測した座標が入っている（memoryが空じゃないこと）
         self.assertIn("(5, 7)", prompt)
         self.assertIn("(9, 3)", prompt)
