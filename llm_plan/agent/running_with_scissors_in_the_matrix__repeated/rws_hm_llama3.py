@@ -37,6 +37,12 @@ class DecentralizedAgent(abc.ABC):
         self.all_actions = Queue()
         self.generate_system_message()
         self.memory_states = {}
+        # Track when each (entity_type, location) was last observed (for RAG / staleness handling)
+        self.memory_last_seen: Dict[Tuple[str, Tuple[int, int]], int] = {}
+        # RAG controls (can be overridden via config)
+        self.rag_enabled: bool = config.get("rag_enabled", True)
+        self.rag_topk: int = int(config.get("rag_topk", 20))
+        self.rag_ttl: int = int(config.get("rag_ttl", 120))
         self.interact_steps = 0
         self.interaction_history = []
         self.opponent_hypotheses = {}
@@ -122,6 +128,11 @@ class DecentralizedAgent(abc.ABC):
             if k.startswith("player_1" if self.agent_id == "player_0" else "player_0")
         ]
 
+        # RAG: compact memory context for the LLM prompt
+        player_position_list = next(iter(player_position.values()))
+        current_position = player_position_list[0] if player_position_list else None
+        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
+
         strategy_request = f"""
             Strategy Request:
             You are at step {step} of the game.
@@ -143,7 +154,8 @@ class DecentralizedAgent(abc.ABC):
             - Observable Blue Box Locations: {blue_locations}
             - Observable Purple Box Locations: {purple_locations}
             - Observable Opponent Locations: {opponent_locations}
-            - Previously seen states from memory (format: ((x,y), step last observed): {self.memory_states}
+            - Retrieved memory context (RAG):
+            {rag_context}
             
             {strategy_request}
             """
@@ -160,6 +172,68 @@ class DecentralizedAgent(abc.ABC):
             for i, (location, step_last_observed, distance) in enumerate(locations):
                 distance = f"distance: {self.calculate_manhattan_distance(current_location, location)}"
                 self.memory_states[entity_type][i] = (location, step_last_observed, distance)
+    def retrieve_memory_context(
+        self,
+        current_position: Optional[Tuple[int, int]],
+        step: int,
+        *,
+        topk: Optional[int] = None,
+        ttl: Optional[int] = None,
+        include_entity_types: Optional[List[str]] = None,
+    ) -> str:
+        """Return a compact, evidence-style memory context for prompting (RAG-style).
+
+        - Keeps only top-k items by distance (then recency).
+        - Drops items older than ttl steps (stale; may have been collected).
+        """
+        if not getattr(self, "rag_enabled", True):
+            return "RAG_CONTEXT_BEGIN\n(RAG disabled)\nRAG_CONTEXT_END"
+
+        topk = int(topk if topk is not None else getattr(self, "rag_topk", 20))
+        ttl = int(ttl if ttl is not None else getattr(self, "rag_ttl", 120))
+
+        # Default: focus on resources + opponent + self position
+        if include_entity_types is None:
+            player_key = self.agent_id
+            opponent_key = "player_1" if self.agent_id == "player_0" else "player_0"
+            include_entity_types = ["yellow_box", "blue_box", "purple_box", opponent_key, player_key]
+
+        candidates: List[Tuple[float, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
+        for entity_type in include_entity_types:
+            for loc in self.memory_states.get(entity_type, []):
+                loc_t = tuple(loc)
+                last = self.memory_last_seen.get((entity_type, loc_t))
+                if last is None:
+                    age = None
+                else:
+                    age = int(step) - int(last)
+                    if age > ttl:
+                        continue
+
+                dist = self.calculate_manhattan_distance(current_position, loc_t)
+                recency_key = -(last if last is not None else -1)  # more recent first
+                candidates.append((dist, recency_key, entity_type, loc_t, last, age))
+
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        top = candidates[:topk]
+
+        lines: List[str] = []
+        for dist, _rk, entity_type, loc_t, last, age in top:
+            last_s = str(last) if last is not None else "unknown"
+            age_s = str(age) if age is not None else "unknown"
+            lines.append(f"- {entity_type}: loc={loc_t}, last_seen_step={last_s}, age={age_s}, manhattan={dist}")
+
+        if not lines:
+            body = "(no relevant memories found under TTL)"
+        else:
+            body = "\n".join(lines)
+
+        note = (
+            f"NOTE: Entries older than {ttl} steps are omitted. Resources can be collected by the opponent, "
+            "so treat retrieved entries as evidence (verify upon arrival), not guaranteed truth."
+        )
+        return "RAG_CONTEXT_BEGIN\n" + body + "\n" + note + "\nRAG_CONTEXT_END"
+
 
     def generate_feedback_user_message(
         self, state, execution_outcomes, get_action_from_response_errors, rewards, step
@@ -177,6 +251,9 @@ class DecentralizedAgent(abc.ABC):
 
         player_position_list = next(iter(player_position.values()))
         current_position = player_position_list[0] if player_position_list else None
+
+        # RAG: compact memory context for the LLM prompt
+        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
 
         yellow_locations = ego_state.get("yellow_box", [])
         blue_locations = ego_state.get("blue_box", [])
@@ -256,7 +333,8 @@ class DecentralizedAgent(abc.ABC):
             - Observable Blue Box Locations: {blue_locations}
             - Observable Purple Box Locations: {purple_locations}
             - Observable Opponent Locations: {opponent_locations}
-            - Previously seen states from memory (format: ((x,y), step last observed, distance from current location): {self.memory_states}
+            - Retrieved memory context (RAG):
+            {rag_context}
 
             Execution Outcomes:
             {execution_outcomes}
@@ -839,7 +917,6 @@ class DecentralizedAgent(abc.ABC):
                         goal_pos = func_args[1]
                         output = f"Out of game now due to hit by laser in the last 5 steps."
                         return output
-
     def update_memory(self, state, step):
         ego_state = state[self.agent_id]
         player_key = self.agent_id
@@ -850,11 +927,22 @@ class DecentralizedAgent(abc.ABC):
             else:
                 observed_locations = ego_state.get(entity_type, [])
             for location in observed_locations:
+                loc_t = tuple(location)
+
+                # Remove this location from other entities (and their last_seen bookkeeping)
                 for other_entity in self.memory_states:
                     if other_entity != entity_type:
-                        self.memory_states[other_entity] = [loc for loc in self.memory_states[other_entity] if loc != location]
-                self.memory_states[entity_type] = [loc for loc in self.memory_states[entity_type] if loc != location]
-                self.memory_states[entity_type].append(location)
+                        if loc_t in self.memory_states[other_entity]:
+                            self.memory_states[other_entity] = [loc for loc in self.memory_states[other_entity] if loc != loc_t]
+                        self.memory_last_seen.pop((other_entity, loc_t), None)
+
+                # De-duplicate within the same entity
+                if loc_t in self.memory_states[entity_type]:
+                    self.memory_states[entity_type] = [loc for loc in self.memory_states[entity_type] if loc != loc_t]
+                self.memory_states[entity_type].append(loc_t)
+
+                # Record when we last saw this (entity_type, location)
+                self.memory_last_seen[(entity_type, loc_t)] = int(step)
 
     def interact(self, state, location):
         ego_state = state[self.agent_id]
