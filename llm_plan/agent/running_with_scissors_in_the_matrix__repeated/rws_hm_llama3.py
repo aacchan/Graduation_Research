@@ -50,7 +50,7 @@ class DecentralizedAgent(abc.ABC):
         self.good_hypothesis_found = False
         self.alpha = 0.3  # learning rate for updating hypothesis values
         self.correct_guess_reward = 1
-        self.good_hypothesis_thr = 0.7
+        self.good_hypothesis_thr = 0.25
         self.top_k = 7  # number of top hypotheses to evaluate
         self.self_improve = config.get("self_improve", False)
         self.temperature = config.get("temperature", 0.2)  # ★ 追加：デフォルト温度
@@ -132,7 +132,6 @@ class DecentralizedAgent(abc.ABC):
         player_position_list = next(iter(player_position.values()))
         current_position = player_position_list[0] if player_position_list else None
         rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
-
         strategy_request = f"""
             Strategy Request:
             You are at step {step} of the game.
@@ -172,70 +171,133 @@ class DecentralizedAgent(abc.ABC):
             for i, (location, step_last_observed, distance) in enumerate(locations):
                 distance = f"distance: {self.calculate_manhattan_distance(current_location, location)}"
                 self.memory_states[entity_type][i] = (location, step_last_observed, distance)
-    def retrieve_memory_context(
-        self,
-        current_position: Optional[Tuple[int, int]],
-        step: int,
-        *,
-        topk: Optional[int] = None,
-        ttl: Optional[int] = None,
-        include_entity_types: Optional[List[str]] = None,
-    ) -> str:
-        """Return a compact, evidence-style memory context for prompting (RAG-style).
 
-        - Keeps only top-k items by distance (then recency).
-        - Drops items older than ttl steps (stale; may have been collected).
-        """
-        if not getattr(self, "rag_enabled", True):
-            return "RAG_CONTEXT_BEGIN\n(RAG disabled)\nRAG_CONTEXT_END"
+def infer_target_entity_types(self, ego_state: Dict[str, Any]) -> List[str]:
+    """Infer which resource entity types are needed to reach `my_next_inventory`.
 
-        topk = int(topk if topk is not None else getattr(self, "rag_topk", 20))
-        ttl = int(ttl if ttl is not None else getattr(self, "rag_ttl", 120))
+    Returns a list like ['purple_box'] or ['blue_box', 'yellow_box'].
+    If target inventory is unavailable or nothing is needed, returns [].
+    """
+    target = {}
+    try:
+        target = (self.next_inventories or {}).get("my_next_inventory", {}) or {}
+    except Exception:
+        target = {}
+    inv = ego_state.get("inventory", None)
+    if not isinstance(target, dict) or not isinstance(inv, (list, tuple)) or len(inv) < 3:
+        return []
 
-        # Default: focus on resources + opponent + self position
-        if include_entity_types is None:
-            player_key = self.agent_id
-            opponent_key = "player_1" if self.agent_id == "player_0" else "player_0"
-            include_entity_types = ["yellow_box", "blue_box", "purple_box", opponent_key, player_key]
+    # inventory order: [yellow, purple, blue]
+    current = {
+        "rock/yellow": float(inv[0]),
+        "paper/purple": float(inv[1]),
+        "scissors/blue": float(inv[2]),
+    }
+    need_to_entity = {
+        "rock/yellow": "yellow_box",
+        "paper/purple": "purple_box",
+        "scissors/blue": "blue_box",
+    }
 
-        candidates: List[Tuple[float, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
-        for entity_type in include_entity_types:
-            for loc in self.memory_states.get(entity_type, []):
-                loc_t = tuple(loc)
-                last = self.memory_last_seen.get((entity_type, loc_t))
-                if last is None:
-                    age = None
-                else:
-                    age = int(step) - int(last)
-                    if age > ttl:
-                        continue
+    needed: List[str] = []
+    for inv_key, entity in need_to_entity.items():
+        try:
+            if float(target.get(inv_key, 0)) > float(current.get(inv_key, 0)):
+                needed.append(entity)
+        except Exception:
+            continue
+    return needed
 
-                dist = self.calculate_manhattan_distance(current_position, loc_t)
-                recency_key = -(last if last is not None else -1)  # more recent first
-                candidates.append((dist, recency_key, entity_type, loc_t, last, age))
+    
+def retrieve_memory_context(
+    self,
+    current_position: Optional[Tuple[int, int]],
+    step: int,
+    *,
+    target_entity_types: Optional[List[str]] = None,
+    topk: Optional[int] = None,
+    ttl: Optional[int] = None,
+    include_opponent: bool = True,
+) -> str:
+    """Return a compact, evidence-style memory context for prompting (RAG-style).
 
-        candidates.sort(key=lambda x: (x[0], x[1]))
-        top = candidates[:topk]
+    Ordering requirement:
+      1) Target resources (needed for my_next_inventory) first
+      2) Opponent location(s)
+      3) Other resources
 
-        lines: List[str] = []
-        for dist, _rk, entity_type, loc_t, last, age in top:
-            last_s = str(last) if last is not None else "unknown"
-            age_s = str(age) if age is not None else "unknown"
-            lines.append(f"- {entity_type}: loc={loc_t}, last_seen_step={last_s}, age={age_s}, manhattan={dist}")
+    Within each group, items are ranked by:
+      - Manhattan distance (closer first)
+      - Recency (more recent first)
+    Items older than `ttl` steps are omitted.
+    """
+    if not getattr(self, "rag_enabled", True):
+        return "RAG_CONTEXT_BEGIN\n(RAG disabled)\nRAG_CONTEXT_END"
 
-        if not lines:
-            body = "(no relevant memories found under TTL)"
-        else:
-            body = "\n".join(lines)
+    topk = int(topk if topk is not None else getattr(self, "rag_topk", 20))
+    ttl = int(ttl if ttl is not None else getattr(self, "rag_ttl", 120))
 
-        note = (
-            f"NOTE: Entries older than {ttl} steps are omitted. Resources can be collected by the opponent, "
-            "so treat retrieved entries as evidence (verify upon arrival), not guaranteed truth."
-        )
-        return "RAG_CONTEXT_BEGIN\n" + body + "\n" + note + "\nRAG_CONTEXT_END"
+    resource_types = ["yellow_box", "blue_box", "purple_box"]
+    opponent_key = "player_1" if self.agent_id == "player_0" else "player_0"
 
+    # If target_entity_types is not provided, default to "all resources"
+    if target_entity_types is None:
+        target_entity_types = list(resource_types)
+    # Normalize (keep valid + preserve order + unique)
+    seen = set()
+    target_entity_types = [t for t in target_entity_types if t in resource_types and not (t in seen or seen.add(t))]
 
-    def generate_feedback_user_message(
+    other_resource_types = [t for t in resource_types if t not in set(target_entity_types)]
+
+    def group_id(entity_type: str) -> int:
+        if entity_type in target_entity_types:
+            return 0
+        if include_opponent and entity_type == opponent_key:
+            return 1
+        if entity_type in other_resource_types:
+            return 2
+        return 3
+
+    # Build candidates
+    candidates: List[Tuple[int, float, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
+    include_types: List[str] = []
+    include_types.extend(target_entity_types)
+    if include_opponent:
+        include_types.append(opponent_key)
+    include_types.extend(other_resource_types)
+
+    for entity_type in include_types:
+        for loc in self.memory_states.get(entity_type, []):
+            loc_t = tuple(loc)
+            last = self.memory_last_seen.get((entity_type, loc_t))
+            age: Optional[int] = None
+            if last is not None:
+                age = int(step) - int(last)
+                if age > ttl:
+                    continue
+
+            dist = self.calculate_manhattan_distance(current_position, loc_t)
+            recency_key = -(last if last is not None else -1)  # more recent first
+            candidates.append((group_id(entity_type), dist, recency_key, entity_type, loc_t, last, age))
+
+    # Sort by group priority first, then distance, then recency
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    top = candidates[:topk]
+
+    lines: List[str] = []
+    for gid, dist, _rk, entity_type, loc_t, last, age in top:
+        last_s = str(last) if last is not None else "unknown"
+        age_s = str(age) if age is not None else "unknown"
+        lines.append(f"- {entity_type}: loc={loc_t}, last_seen_step={last_s}, age={age_s}, manhattan={dist}")
+
+    body = "\n".join(lines) if lines else "(no relevant memories found under TTL)"
+    note = (
+        f"NOTE: Entries older than {ttl} steps are omitted. Resources can be collected by the opponent, "
+        "so treat retrieved entries as evidence (verify upon arrival), not guaranteed truth."
+    )
+    return "RAG_CONTEXT_BEGIN\n" + body + "\n" + note + "\nRAG_CONTEXT_END"
+
+def generate_feedback_user_message(
         self, state, execution_outcomes, get_action_from_response_errors, rewards, step
     ):
         ego_state = state[self.agent_id]
@@ -253,8 +315,13 @@ class DecentralizedAgent(abc.ABC):
         current_position = player_position_list[0] if player_position_list else None
 
         # RAG: compact memory context for the LLM prompt
-        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
+        target_entity_types = self.infer_target_entity_types(ego_state)
 
+        rag_context = self.retrieve_memory_context(
+            current_position=current_position,
+            step=step,
+            target_entity_types=(target_entity_types or None),
+        )
         yellow_locations = ego_state.get("yellow_box", [])
         blue_locations = ego_state.get("blue_box", [])
         purple_locations = ego_state.get("purple_box", [])
