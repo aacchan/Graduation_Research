@@ -43,8 +43,6 @@ class DecentralizedAgent(abc.ABC):
         self.rag_enabled: bool = config.get("rag_enabled", True)
         self.rag_topk: int = int(config.get("rag_topk", 20))
         self.rag_ttl: int = int(config.get("rag_ttl", 120))
-        self.rag_section_headers: bool = bool(config.get("rag_section_headers", True))
-        self.rag_include_self: bool = bool(config.get("rag_include_self", False))
         self.interact_steps = 0
         self.interaction_history = []
         self.opponent_hypotheses = {}
@@ -52,7 +50,7 @@ class DecentralizedAgent(abc.ABC):
         self.good_hypothesis_found = False
         self.alpha = 0.3  # learning rate for updating hypothesis values
         self.correct_guess_reward = 1
-        self.good_hypothesis_thr = 0.7
+        self.good_hypothesis_thr = 0.25
         self.top_k = 7  # number of top hypotheses to evaluate
         self.self_improve = config.get("self_improve", False)
         self.temperature = config.get("temperature", 0.2)  # ★ 追加：デフォルト温度
@@ -133,9 +131,7 @@ class DecentralizedAgent(abc.ABC):
         # RAG: compact memory context for the LLM prompt
         player_position_list = next(iter(player_position.values()))
         current_position = player_position_list[0] if player_position_list else None
-        target_entity_types = self._infer_target_entity_types_from_next_inventory(player_inventory)
-        rag_context = self.retrieve_memory_context(current_position=current_position, step=step, target_entity_types=target_entity_types)
-
+        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
         strategy_request = f"""
             Strategy Request:
             You are at step {step} of the game.
@@ -170,174 +166,134 @@ class DecentralizedAgent(abc.ABC):
             return float("inf")
         return abs(point1[0] - point2[0]) + abs(point1[1] - point2[1])
 
-
-    def _infer_target_entity_types_from_next_inventory(self, player_inventory: List[float]) -> List[str]:
-        """Infer which resource types we currently want (target resources) from self.next_inventories.
-
-        Returns entity_type names like: ['purple_box', 'blue_box'] in priority order (largest deficit first).
-        If next_inventories is missing/invalid, returns [].
-        """
-        try:
-            nxt = getattr(self, "next_inventories", None) or {}
-            my = nxt.get("my_next_inventory", {}) or {}
-        except Exception:
-            return []
-
-        # Inventory list is [yellow, purple, blue] in this environment.
-        cur = {
-            "rock/yellow": int(player_inventory[0]) if len(player_inventory) > 0 else 0,
-            "paper/purple": int(player_inventory[1]) if len(player_inventory) > 1 else 0,
-            "scissors/blue": int(player_inventory[2]) if len(player_inventory) > 2 else 0,
-        }
-        mapping = {
-            "rock/yellow": "yellow_box",
-            "paper/purple": "purple_box",
-            "scissors/blue": "blue_box",
-        }
-
-        deficits = []
-        for k, ent in mapping.items():
-            tgt = int(my.get(k, 0) or 0)
-            d = tgt - int(cur.get(k, 0))
-            if d > 0:
-                deficits.append((d, ent))
-
-        deficits.sort(key=lambda x: -x[0])  # largest deficit first
-        return [ent for _d, ent in deficits]
     def update_memory_states_with_distance(self, current_location: Tuple[int, int]):
         for entity_type, locations in self.memory_states.items():
             for i, (location, step_last_observed, distance) in enumerate(locations):
                 distance = f"distance: {self.calculate_manhattan_distance(current_location, location)}"
                 self.memory_states[entity_type][i] = (location, step_last_observed, distance)
-    def retrieve_memory_context(
-        self,
-        current_position: Optional[Tuple[int, int]],
-        step: int,
-        *,
-        topk: Optional[int] = None,
-        ttl: Optional[int] = None,
-        include_entity_types: Optional[List[str]] = None,
-        target_entity_types: Optional[List[str]] = None,
-    ) -> str:
-        """Return an evidence-style memory context (RAG) for prompting.
 
-        Ordering rule (as requested):
-          1) target resources (what we currently want)
-          2) opponent location(s)
-          3) other resources
+def infer_target_entity_types(self, ego_state: Dict[str, Any]) -> List[str]:
+    """Infer which resource entity types are needed to reach `my_next_inventory`.
 
-        Within each group: nearer first, then newer.
-        """
-        if not getattr(self, "rag_enabled", True):
-            return "RAG_CONTEXT_BEGIN\n(RAG disabled)\nRAG_CONTEXT_END"
+    Returns a list like ['purple_box'] or ['blue_box', 'yellow_box'].
+    If target inventory is unavailable or nothing is needed, returns [].
+    """
+    target = {}
+    try:
+        target = (self.next_inventories or {}).get("my_next_inventory", {}) or {}
+    except Exception:
+        target = {}
+    inv = ego_state.get("inventory", None)
+    if not isinstance(target, dict) or not isinstance(inv, (list, tuple)) or len(inv) < 3:
+        return []
 
-        k_total = int(topk if topk is not None else getattr(self, "rag_topk", 20))
-        ttl_val = int(ttl if ttl is not None else getattr(self, "rag_ttl", 120))
+    # inventory order: [yellow, purple, blue]
+    current = {
+        "rock/yellow": float(inv[0]),
+        "paper/purple": float(inv[1]),
+        "scissors/blue": float(inv[2]),
+    }
+    need_to_entity = {
+        "rock/yellow": "yellow_box",
+        "paper/purple": "purple_box",
+        "scissors/blue": "blue_box",
+    }
 
-        # Determine opponent id (player_0 <-> player_1)
-        opponent_id = "player_1" if self.agent_id == "player_0" else "player_0"
+    needed: List[str] = []
+    for inv_key, entity in need_to_entity.items():
+        try:
+            if float(target.get(inv_key, 0)) > float(current.get(inv_key, 0)):
+                needed.append(entity)
+        except Exception:
+            continue
+    return needed
 
-        # Default entity types to consider
-        if include_entity_types is None:
-            include_entity_types = ["yellow_box", "blue_box", "purple_box", opponent_id]
-            if getattr(self, "rag_include_self", False):
-                include_entity_types.append(self.agent_id)
+    
+def retrieve_memory_context(
+    self,
+    current_position: Optional[Tuple[int, int]],
+    step: int,
+    *,
+    target_entity_types: Optional[List[str]] = None,
+    topk: Optional[int] = None,
+    ttl: Optional[int] = None,
+    include_opponent: bool = True,
+) -> str:
+    """Return a compact, evidence-style memory context for prompting (RAG-style).
 
-        target_set = set(target_entity_types or [])
+    Ordering requirement:
+      1) Target resources (needed for my_next_inventory) first
+      2) Opponent location(s)
+      3) Other resources
 
-        # Collect candidates: (group_id, dist, age, -last_seen, entity_type, loc, last_seen, age)
-        candidates: List[Tuple[int, int, int, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
-        for entity_type in include_entity_types:
-            for loc in self.memory_states.get(entity_type, []):
-                loc_t = tuple(loc)
-                last = self.memory_last_seen.get((entity_type, loc_t))
-                if last is None:
-                    age = None
-                else:
-                    age = int(step) - int(last)
-                    if age > ttl_val:
-                        continue
+    Within each group, items are ranked by:
+      - Manhattan distance (closer first)
+      - Recency (more recent first)
+    Items older than `ttl` steps are omitted.
+    """
+    if not getattr(self, "rag_enabled", True):
+        return ""
 
-                dist = int(self.calculate_manhattan_distance(current_position, loc_t))
-                age_key = int(age) if age is not None else 10**9
-                last_key = int(last) if last is not None else -1
+    topk = int(topk if topk is not None else getattr(self, "rag_topk", 20))
+    ttl = int(ttl if ttl is not None else getattr(self, "rag_ttl", 120))
 
-                # Grouping priority
-                if entity_type in target_set:
-                    group = 0
-                elif entity_type == opponent_id:
-                    group = 1
-                elif entity_type == self.agent_id:
-                    group = 3  # self (if included) goes last
-                else:
-                    group = 2
+    resource_types = ["yellow_box", "blue_box", "purple_box"]
+    opponent_key = "player_1" if self.agent_id == "player_0" else "player_0"
 
-                candidates.append((group, dist, age_key, -last_key, entity_type, loc_t, last, age))
+    # If target_entity_types is not provided, default to "all resources"
+    if target_entity_types is None:
+        target_entity_types = list(resource_types)
+    # Normalize (keep valid + preserve order + unique)
+    seen = set()
+    target_entity_types = [t for t in target_entity_types if t in resource_types and not (t in seen or seen.add(t))]
 
-        # Sort by group, then distance, then age, then recency
-        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    other_resource_types = [t for t in resource_types if t not in set(target_entity_types)]
 
-        # Ensure we always keep at least one opponent entry if present, even if target group is large.
-        # We cap opponent entries to a small number (usually 1).
-        opponent_cap = 2
-        selected: List[Tuple[int, int, int, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
+    def group_id(entity_type: str) -> int:
+        if entity_type in target_entity_types:
+            return 0
+        if include_opponent and entity_type == opponent_key:
+            return 1
+        if entity_type in other_resource_types:
+            return 2
+        return 3
 
-        # 1) targets
-        for c in candidates:
-            if c[0] == 0:
-                selected.append(c)
-                if len(selected) >= k_total:
-                    break
+    # Build candidates
+    candidates: List[Tuple[int, float, int, str, Tuple[int, int], Optional[int], Optional[int]]] = []
+    include_types: List[str] = []
+    include_types.extend(target_entity_types)
+    if include_opponent:
+        include_types.append(opponent_key)
+    include_types.extend(other_resource_types)
 
-        # 2) opponent (if not already full)
-        if len(selected) < k_total:
-            opp_added = 0
-            for c in candidates:
-                if c[0] == 1:
-                    selected.append(c)
-                    opp_added += 1
-                    if len(selected) >= k_total or opp_added >= opponent_cap:
-                        break
+    for entity_type in include_types:
+        for loc in self.memory_states.get(entity_type, []):
+            loc_t = tuple(loc)
+            last = self.memory_last_seen.get((entity_type, loc_t))
+            age: Optional[int] = None
+            if last is not None:
+                age = int(step) - int(last)
+                if age > ttl:
+                    continue
 
-        # 3) others
-        if len(selected) < k_total:
-            for c in candidates:
-                if c[0] in (2, 3):
-                    selected.append(c)
-                    if len(selected) >= k_total:
-                        break
+            dist = self.calculate_manhattan_distance(current_position, loc_t)
+            recency_key = -(last if last is not None else -1)  # more recent first
+            candidates.append((group_id(entity_type), dist, recency_key, entity_type, loc_t, last, age))
 
-        def _format_block(title: str, rows: List[Tuple[int, int, int, int, str, Tuple[int, int], Optional[int], Optional[int]]]) -> str:
-            if not rows:
-                return ""
-            out = []
-            if getattr(self, "rag_section_headers", True):
-                out.append(f"{title}")
-            for _g, dist, _age_key, _rec, et, loc_t, last, age in rows:
-                last_s = str(last) if last is not None else "unknown"
-                age_s = str(age) if age is not None else "unknown"
-                out.append(f"- {et}: loc={loc_t}, last_seen_step={last_s}, age={age_s}, manhattan={dist}")
-            return "\n".join(out)
+    # Sort by group priority first, then distance, then recency
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    top = candidates[:topk]
 
-        tgt_rows = [r for r in selected if r[0] == 0]
-        opp_rows = [r for r in selected if r[0] == 1]
-        oth_rows = [r for r in selected if r[0] in (2, 3)]
+    lines: List[str] = []
+    for gid, dist, _rk, entity_type, loc_t, last, age in top:
+        last_s = str(last) if last is not None else "unknown"
+        age_s = str(age) if age is not None else "unknown"
+        lines.append(f"- {entity_type}: loc={loc_t}, last_seen_step={last_s}, manhattan={dist}")
 
-        parts = []
-        parts.append(_format_block("TARGET_RESOURCES", tgt_rows))
-        parts.append(_format_block("OPPONENT", opp_rows))
-        parts.append(_format_block("OTHER", oth_rows))
-        body = "\n".join([p for p in parts if p.strip()])
+    body = "\n".join(lines) if lines else ""
+    return body
 
-        if not body.strip():
-            body = "(no relevant memories found under TTL)"
-
-        note = (
-            f"NOTE: Entries older than {ttl_val} steps are omitted. Resources can be collected by the opponent, "
-            "so treat retrieved entries as evidence (verify upon arrival), not guaranteed truth."
-        )
-        return "RAG_CONTEXT_BEGIN\n" + body + "\n" + note + "\nRAG_CONTEXT_END"
-    def generate_feedback_user_message(
+def generate_feedback_user_message(
         self, state, execution_outcomes, get_action_from_response_errors, rewards, step
     ):
         ego_state = state[self.agent_id]
@@ -355,8 +311,13 @@ class DecentralizedAgent(abc.ABC):
         current_position = player_position_list[0] if player_position_list else None
 
         # RAG: compact memory context for the LLM prompt
-        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
+        target_entity_types = self.infer_target_entity_types(ego_state)
 
+        rag_context = self.retrieve_memory_context(
+            current_position=current_position,
+            step=step,
+            target_entity_types=(target_entity_types or None),
+        )
         yellow_locations = ego_state.get("yellow_box", [])
         blue_locations = ego_state.get("blue_box", [])
         purple_locations = ego_state.get("purple_box", [])
