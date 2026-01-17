@@ -307,32 +307,14 @@ class DecentralizedAgent(abc.ABC):
                     if len(selected) >= k_total:
                         break
 
-        def _format_block(title: str, rows: List[Tuple[int, int, int, int, str, Tuple[int, int], Optional[int], Optional[int]]]) -> str:
-            if not rows:
-                return ""
-            out = []
-            if getattr(self, "rag_section_headers", True):
-                out.append(f"{title}")
-            for _g, dist, _age_key, _rec, et, loc_t, last, age in rows:
-                last_s = str(last) if last is not None else "unknown"
-                age_s = str(age) if age is not None else "unknown"
-                out.append(f"- {et}: loc={loc_t}, last_seen_step={last_s}, age={age_s}, manhattan={dist}")
-            return "\n".join(out)
+        # Format as simple bullet lines only (no section headers / no notes / no age output).
+        # Order: target resources -> opponent -> other resources.
+        lines: List[str] = []
+        for _g, dist, _age_key, _rec, et, loc_t, last, _age in selected:
+            last_s = str(last) if last is not None else "unknown"
+            lines.append(f"- {et}: loc={loc_t}, last_seen_step={last_s}, manhattan={dist}")
 
-        tgt_rows = [r for r in selected if r[0] == 0]
-        opp_rows = [r for r in selected if r[0] == 1]
-        oth_rows = [r for r in selected if r[0] in (2, 3)]
-
-        parts = []
-        parts.append(_format_block("TARGET_RESOURCES", tgt_rows))
-        parts.append(_format_block("OPPONENT", opp_rows))
-        parts.append(_format_block("OTHER", oth_rows))
-        body = "\n".join([p for p in parts if p.strip()])
-
-        if not body.strip():
-            body = "(no relevant memories found under TTL)"
-
-        return body
+        return "\n".join(lines)
     def generate_feedback_user_message(
         self, state, execution_outcomes, get_action_from_response_errors, rewards, step
     ):
@@ -351,7 +333,13 @@ class DecentralizedAgent(abc.ABC):
         current_position = player_position_list[0] if player_position_list else None
 
         # RAG: compact memory context for the LLM prompt
-        rag_context = self.retrieve_memory_context(current_position=current_position, step=step)
+        # Prefer showing resources that help reach the next target inventory.
+        target_entity_types = self._infer_target_entity_types_from_next_inventory(player_inventory)
+        rag_context = self.retrieve_memory_context(
+            current_position=current_position,
+            step=step,
+            target_entity_types=target_entity_types,
+        )
 
         yellow_locations = ego_state.get("yellow_box", [])
         blue_locations = ego_state.get("blue_box", [])
